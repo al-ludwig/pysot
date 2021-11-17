@@ -610,8 +610,8 @@ def main():
     dataset_root = os.path.join(cur_dir, '../testing_dataset', dataset_name)
 
     # load config
-    # config = '.\\experiments\\siamrpn_r50_l234_dwxcorr\\config.yaml'
-    config = '..\\experiments\\siamrpn_r50_l234_dwxcorr\\config.yaml'
+    config = '.\\experiments\\siamrpn_r50_l234_dwxcorr\\config.yaml'
+    # config = '..\\experiments\\siamrpn_r50_l234_dwxcorr\\config.yaml'
     cfg.merge_from_file(config)
 
     # create dataset
