@@ -263,6 +263,9 @@ from pysot.core.config import cfg
 from pysot.utils.anchor import Anchors
 from pysot.tracker.base_tracker import SiameseTracker
 
+def to_numpy(tensor):
+    return np.ascontiguousarray(tensor.detach().cpu().numpy()) if tensor.requires_grad else np.ascontiguousarray(tensor.cpu().numpy())
+
 class SiamRPNTracker(SiameseTracker):
     def __init__(self, target_net, search_net, xcorr):
         super(SiamRPNTracker, self).__init__()
@@ -801,7 +804,7 @@ def main():
 
     tracker = SiamRPNTracker(target_net, search_net, xcorr)
 
-    videoname = 'ball1'
+    videoname = 'ants1'
 
     for v_idx, video in enumerate(dataset):
         if videoname != '':

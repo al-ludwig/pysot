@@ -107,3 +107,5 @@ testing_dataset/*
 experiments
 .vscode/launch.json
 toolkit/utils/region.c
+
+*.npy
