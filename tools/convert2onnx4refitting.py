@@ -865,7 +865,7 @@ def main():
                 'baseline', video.name)
         if not os.path.isdir(video_path):
             os.makedirs(video_path)
-        result_path = os.path.join(video_path, '{}_002.txt'.format(video.name))
+        result_path = os.path.join(video_path, '{}_000.txt'.format(video.name))
         with open(result_path, 'w') as f:
             for x in pred_bboxes:
                 if isinstance(x, int):
