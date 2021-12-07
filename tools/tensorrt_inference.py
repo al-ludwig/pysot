@@ -121,7 +121,8 @@ class TrtModel:
         self.warmup_engine('target', z_crop_ini)
         x_crop_ini = np.zeros((1, 3, 255, 255), dtype=np.float16)
         self.warmup_engine('search', x_crop_ini)
-        y_crop_ini = np.zeros((6, 256, 29, 29), dtype=np.float16)
+        y_crop_ini = np.zeros((1, 6, 256, 29, 29), dtype=np.float16)
+        self.warmup_engine('xcorr', y_crop_ini)
     
     def cuda_cleanup(self):
         self.ctx.pop()
@@ -153,6 +154,14 @@ class TrtModel:
         t_infer_kernels = (cv2.getTickCount() - tic)/cv2.getTickFrequency()
         logging.debug("Time for inference of template (creating kernels) (s): " + str(t_infer_kernels))
 
+        # somehow:
+        # kernels[0] <-> cls2
+        # kernels[1] <-> loc2
+        # kernels[2] <-> cls3
+        # kernels[3] <-> loc3
+        # kernels[4] <-> cls4
+        # kernels[5] <-> loc4
+
         # Remove any context from the top of the context stack, deactivating it.
         self.ctx.pop()
         output_shape = (1, 256, 5, 5)
@@ -162,16 +171,22 @@ class TrtModel:
         # refit engine_xcorr weights with kernels
         logging.debug("Refitting xcorr-engine ...")
         refitter = trt.Refitter(self.engine_xcorr, TRT_LOGGER)
-        # weights_names = refitter.get_all()
-        # dw_xcorr_cls2 = 'Conv_2'
-        # dw_xcorr_cls3 = 'Conv_28'
-        # dw_xcorr_cls4 = 'Conv_54'
-        # dw_xcorr_loc2 = 'Conv_15'
-        # dw_xcorr_loc3 = 'Conv_41'
-        # dw_xcorr_loc4 = 'Conv_67'
-        conv_names = ['Conv_2', 'Conv_28', 'Conv_54', 'Conv_15', 'Conv_41', 'Conv_67']
+
+        # dw_xcorr_cls2 = '1'
+        # dw_xcorr_cls3 = '3'
+        # dw_xcorr_cls4 = '5'
+        # dw_xcorr_loc2 = '2'
+        # dw_xcorr_loc3 = '4'
+        # dw_xcorr_loc4 = '6'
+        conv_names = ['1', '2', '3', '4', '5', '6']
         for name, kernel in zip(conv_names, self.kernels):
-            refitter.set_weights(name, trt.WeightsRole.KERNEL, kernel)
+            # refitter.set_weights(name, trt.WeightsRole.KERNEL, kernel)
+            refitter.set_named_weights(name, kernel)
+        missing_weights = refitter.get_missing_weights()
+        assert len(
+            missing_weights) == 0, "Refitter found missing weights. Call set_named_weights() or set_weights() for all missing weights"
+        refitter.refit_cuda_engine()
+
         logging.debug("Refitting xcorr-engine done.")
 
     
@@ -186,9 +201,17 @@ class TrtModel:
         t_infer_searchf = (cv2.getTickCount() - tic)/cv2.getTickFrequency()
         logging.debug("Time for inference of search features (s): " + str(t_infer_searchf))
 
+        # somehow:
+        # searchf[0] <-> cls2
+        # searchf[1] <-> loc2
+        # searchf[2] <-> cls3
+        # searchf[3] <-> loc3
+        # searchf[4] <-> cls4
+        # searchf[5] <-> loc4
+
         # Remove any context from the top of the context stack, deactivating it.
         self.ctx.pop()
-        # output_shape = (1, 256, 29, 29)
+        output_shape = (1, 256, 29, 29)
         # self.searchf = [output.reshape(output_shape) for output in self.searchf]
 
         # Make self the active context, pushing it on top of the context stack.
@@ -204,10 +227,20 @@ class TrtModel:
         # Remove any context from the top of the context stack, deactivating it.
         self.ctx.pop()
 
+        self.xcorr[0] = self.xcorr[0] * 0.381
+        self.xcorr[1] = self.xcorr[1] * 0.436
+        self.xcorr[2] = self.xcorr[2] * 0.183
+        self.xcorr[3] = self.xcorr[3] * 0.176
+        self.xcorr[4] = self.xcorr[4] * 0.165
+        self.xcorr[5] = self.xcorr[5] * 0.659
+
+        self.cls = self.xcorr[0] + self.xcorr[1] + self.xcorr[2]
+        self.loc = self.xcorr[3] + self.xcorr[4] + self.xcorr[5]
+
         cls_shape = (1, 10, 25, 25)
         loc_shape = (1, 20, 25, 25)
-        self.xcorr[0] = self.xcorr[0].reshape(cls_shape)
-        self.xcorr[1] = self.xcorr[1].reshape(loc_shape)
+        self.cls = self.cls.reshape(cls_shape)
+        self.loc = self.loc.reshape(loc_shape)
 
 
 class SiamRPNTracker:
@@ -384,8 +417,8 @@ class SiamRPNTracker:
 
         # self.xcorr[0] = cls
         # self.xcorr[1] = loc
-        score = self._convert_score(self.trtmodel.xcorr[0])
-        pred_bbox = self._convert_bbox(self.trtmodel.xcorr[1], self.anchors)
+        score = self._convert_score(self.trtmodel.cls)
+        pred_bbox = self._convert_bbox(self.trtmodel.loc, self.anchors)
 
         def change(r):
             return np.maximum(r, 1. / r)

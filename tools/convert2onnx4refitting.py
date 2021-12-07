@@ -480,10 +480,10 @@ class DepthwiseXCorr(nn.Module):
         kernel[4] = kernel[4].view(256, 1, 5, 5)
         kernel[5] = kernel[5].view(256, 1, 5, 5)
         self.dw_xcorr_cls2.weight = nn.Parameter(kernel[0])
-        self.dw_xcorr_cls3.weight = nn.Parameter(kernel[1])
-        self.dw_xcorr_cls4.weight = nn.Parameter(kernel[2])
-        self.dw_xcorr_loc2.weight = nn.Parameter(kernel[3])
-        self.dw_xcorr_loc3.weight = nn.Parameter(kernel[4])
+        self.dw_xcorr_cls3.weight = nn.Parameter(kernel[2])
+        self.dw_xcorr_cls4.weight = nn.Parameter(kernel[4])
+        self.dw_xcorr_loc2.weight = nn.Parameter(kernel[1])
+        self.dw_xcorr_loc3.weight = nn.Parameter(kernel[3])
         self.dw_xcorr_loc4.weight = nn.Parameter(kernel[5])
     
     def forward(self, search):
@@ -493,19 +493,19 @@ class DepthwiseXCorr(nn.Module):
         cls_i = cls_i.view(1, 256, cls_i.size(2), cls_i.size(3))
         # cls_i = cls_i.detach()?
         cls.append(cls_i)
-        loc_i = self.dw_xcorr_loc2(search[3])
+        loc_i = self.dw_xcorr_loc2(search[1])
         loc_i = loc_i.view(1, 256, loc_i.size(2), loc_i.size(3))
         # loc_i = loc_i.detach()?
         loc.append(loc_i)
-        cls_i = self.dw_xcorr_cls3(search[1])
+        cls_i = self.dw_xcorr_cls3(search[2])
         cls_i = cls_i.view(1, 256, cls_i.size(2), cls_i.size(3))
         # cls_i = cls_i.detach()?
         cls.append(cls_i)
-        loc_i = self.dw_xcorr_loc3(search[4])
+        loc_i = self.dw_xcorr_loc3(search[3])
         loc_i = loc_i.view(1, 256, loc_i.size(2), loc_i.size(3))
         # loc_i = loc_i.detach()?
         loc.append(loc_i)
-        cls_i = self.dw_xcorr_cls4(search[2])
+        cls_i = self.dw_xcorr_cls4(search[4])
         cls_i = cls_i.view(1, 256, cls_i.size(2), cls_i.size(3))
         # cls_i = cls_i.detach()?
         cls.append(cls_i)
@@ -564,8 +564,16 @@ class XCorrBuilder(nn.Module):
                 nn.ReLU(inplace=True),
                 nn.Conv2d(hidden, out_channels_loc, kernel_size=1)
                 )
-        self.weight_cls = nn.Parameter(torch.Tensor([0.38156851768108546, 0.4364767608115956,  0.18195472150731892]))
-        self.weight_loc = nn.Parameter(torch.Tensor([0.17644893463361863, 0.16564198028417967, 0.6579090850822015]))
+        weight_cls2 = nn.Parameter(torch.Tensor([0.38156851768108546]))
+        weight_cls3 = nn.Parameter(torch.Tensor([0.4364767608115956]))
+        weight_cls4 = nn.Parameter(torch.Tensor([0.18195472150731892]))
+        weight_loc2 = nn.Parameter(torch.Tensor([0.17644893463361863]))
+        weight_loc3 = nn.Parameter(torch.Tensor([0.16564198028417967]))
+        weight_loc4 = nn.Parameter(torch.Tensor([0.6579090850822015]))
+        self.weight_cls = [weight_cls2, weight_cls3, weight_cls4]
+        self.weight_loc = [weight_loc2, weight_loc3, weight_loc4]
+        # self.weight_cls = nn.Parameter(torch.Tensor([0.38156851768108546, 0.4364767608115956,  0.18195472150731892]))
+        # self.weight_loc = nn.Parameter(torch.Tensor([0.17644893463361863, 0.16564198028417967, 0.6579090850822015]))
     
     def init(self, kernel):
         # set kernel as weights for depthwise xcorrelation
@@ -589,7 +597,8 @@ class XCorrBuilder(nn.Module):
             for i in range(3):
                 s += lst[i] * weight[i]
             return s
-        return weighted_avg(cls, self.weight_cls), weighted_avg(loc, self.weight_loc)
+        # return weighted_avg(cls, self.weight_cls), weighted_avg(loc, self.weight_loc)
+        return cls, loc
 
 class RPNBuilder(nn.Module):
     def __init__(self):
@@ -668,14 +677,13 @@ def main():
 
     target_net_dict.update(pretrained_dict_target)
     target_net.load_state_dict(target_net_dict)
-    target_net.cuda()
+    # target_net.cuda()
 
     # tmp_target_net = list(target_net_dict)[250:]
     # tmp_pretrained = list(pretrained_dict)[250:]
 
     # Export the torch target net model to ONNX model
-    # torch.onnx.export(target_net, torch.Tensor(target), "target_net4refit.onnx", export_params=True, opset_version=11,
-    #               do_constant_folding=True, input_names=['input'], output_names=['kernel_cls2', 'kernel_cls3', 'kernel_cls4', 'kernel_loc2', 'kernel_loc3', 'kernel_loc4'])
+    # torch.onnx.export(target_net, torch.Tensor(target), "target_net4refit2.onnx", export_params=True,input_names=['input'], output_names=['kernel_cls2', 'kernel_cls3', 'kernel_cls4', 'kernel_loc2', 'kernel_loc3', 'kernel_loc4'])
     
     # Load the saved torch target net model using ONNX
     # onnx_target = onnx.load("target_net4refit.onnx")
@@ -694,8 +702,8 @@ def main():
     search_net.state_dict().keys()
     search_net_dict = search_net.state_dict()
 
-    # search = search_net.forward(search)
-    # tmp_search_net = list(search_net_dict)[250:]
+    search = search_net.forward(search)
+    tmp_search_net = list(search_net_dict)[250:]
 
     # Load the pre-trained weight to the torch target net model
     # pretrained_dict_search = {k: v for k, v in pretrained_dict_search.items() if k in search_net_dict}
@@ -727,8 +735,8 @@ def main():
     search_net.cuda()
 
     # Export the torch search net model to ONNX model
-    # torch.onnx.export(search_net, torch.Tensor(search), "search_net4refit.onnx", export_params=True, opset_version=11,
-    #               do_constant_folding=True, input_names=['input'], output_names=['search_cls2', 'search_cls3', 'search_cls4', 'search_loc2', 'search_loc3', 'search_loc4'])
+    # torch.onnx.export(search_net, torch.Tensor(search), "search_net4refit2.onnx", export_params=True, 
+    #               input_names=['input'], output_names=['search_cls2', 'search_cls3', 'search_cls4', 'search_loc2', 'search_loc3', 'search_loc4'])
 
     # Load the saved torch search net model using ONNX
     # onnx_search = onnx.load("search_net4refit.onnx")
@@ -786,11 +794,11 @@ def main():
     # pretrained_dict_head.keys()
     xcorr_dict.update(pretrained_dict_xcorr)
     xcorr.load_state_dict(xcorr_dict)
-    xcorr.cuda()
+    # xcorr.cuda()
 
-    # search_s = np.stack([search[0].detach().numpy(), search[1].detach().numpy(), search[2].detach().numpy(), search[3].detach().numpy(), search[4].detach().numpy(), search[5].detach().numpy()])
+    search_s = np.stack([search[0].detach().numpy(), search[1].detach().numpy(), search[2].detach().numpy(), search[3].detach().numpy(), search[4].detach().numpy(), search[5].detach().numpy()])
     # # Export the torch rpn_head model to ONNX model
-    # torch.onnx.export(xcorr, (torch.Tensor(np.random.rand(*search_s.shape))), "rpn_head4refit.onnx", export_params=True, opset_version=11, do_constant_folding=True, input_names = ['input'], output_names = ['cls', 'loc'])
+    torch.onnx.export(xcorr, (torch.Tensor(np.random.rand(*search_s.shape))), "rpn_head4refit5.onnx", export_params=True, input_names = ['input'], output_names = ['cls2', 'cls3', 'cls4', 'loc2', 'loc3', 'loc4'])
     
     # Load the saved xcorr model using ONNX
     # onnx_rpn_head_model = onnx.load("rpn_head4refit.onnx")
