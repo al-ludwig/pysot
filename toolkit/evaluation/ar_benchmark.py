@@ -39,12 +39,13 @@ class AccuracyRobustnessBenchmark:
                                     'failures': failures}
         return result
 
-    def show_result(self, result, eao_result=None, show_video_level=False, helight_threshold=0.5):
+    def show_result(self, result, report_path, eao_result=None, show_video_level=False, helight_threshold=0.5):
         """pretty print result
         Args:
             result: returned dict from function eval
         """
         tracker_name_len = max((max([len(x) for x in result.keys()])+2), 12)
+        report_file = open(report_path, 'w')
         if eao_result is not None:
             header = "|{:^"+str(tracker_name_len)+"}|{:^10}|{:^12}|{:^13}|{:^7}|"
             header = header.format('Tracker Name',
@@ -59,6 +60,9 @@ class AccuracyRobustnessBenchmark:
         print(bar)
         print(header)
         print(bar)
+        report_file.write(bar + '\n')
+        report_file.write(header + '\n')
+        report_file.write(bar + '\n')
         if eao_result is not None:
             tracker_eao = sorted(eao_result.items(),
                                  key=lambda x:x[1]['all'],
@@ -77,12 +81,16 @@ class AccuracyRobustnessBenchmark:
             robustness = np.mean(np.sum(np.array(failures), axis=0) / length) * 100
             if eao_result is None:
                 print(formatter.format(tracker_name, accuracy, robustness, lost_number))
+                report_file.write(formatter.format(tracker_name, accuracy, robustness, lost_number) + '\n')
             else:
                 print(formatter.format(tracker_name, accuracy, robustness, lost_number, eao_result[tracker_name]['all']))
+                report_file.write(formatter.format(tracker_name, accuracy, robustness, lost_number, eao_result[tracker_name]['all']) + '\n')
         print(bar)
+        report_file.write(bar + '\n')
 
         if show_video_level and len(result) < 10:
             print('\n\n')
+            report_file.write('\n\n')
             header1 = "|{:^14}|".format("Tracker name")
             header2 = "|{:^14}|".format("Video name")
             for tracker_name in result.keys():
@@ -93,9 +101,15 @@ class AccuracyRobustnessBenchmark:
             print('-'*len(header1))
             print(header2)
             print('-'*len(header1))
+            report_file.write('-'*len(header1) + '\n')
+            report_file.write(header1 + '\n')
+            report_file.write('-'*len(header1) + '\n')
+            report_file.write(header2 + '\n')
+            report_file.write('-'*len(header1) + '\n')
             videos = list(result[tracker_name]['overlaps'].keys())
             for video in videos:
                 row = "|{:^14}|".format(video)
+                row_report = row
                 for tracker_name in result.keys():
                     overlaps = result[tracker_name]['overlaps'][video]
                     accuracy = np.nanmean(overlaps)
@@ -107,13 +121,19 @@ class AccuracyRobustnessBenchmark:
                         row += f'{Fore.RED}{accuracy_str}{Style.RESET_ALL}|'
                     else:
                         row += accuracy_str+'|'
+                    row_report += accuracy_str+'|'
+
                     lost_num_str = "{:^8.3f}".format(lost_number)
                     if lost_number > 0:
                         row += f'{Fore.RED}{lost_num_str}{Style.RESET_ALL}|'
                     else:
                         row += lost_num_str+'|'
+                    row_report += lost_num_str+'|'
                 print(row)
+                report_file.write(row_report + '\n')
             print('-'*len(header1))
+            report_file.write('-'*len(header1) + '\n')
+        report_file.close()
 
     def _calculate_accuracy_robustness(self, tracker_name):
         overlaps = {}

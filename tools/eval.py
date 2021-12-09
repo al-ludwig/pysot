@@ -42,6 +42,12 @@ def main():
     root = os.path.realpath(os.path.join(os.path.dirname(__file__),
                             '../testing_dataset'))
     root = os.path.join(root, args.dataset)
+
+    if len(trackers) > 1:
+        report_path = os.path.join(tracker_dir, "combined_eval_report.txt")
+    else:
+        report_path = os.path.join(tracker_dir, args.tracker_prefix, "eval_report.txt")
+
     if 'OTB' in args.dataset:
         dataset = OTBDataset(args.dataset, root)
         dataset.set_tracker(tracker_dir, trackers)
@@ -127,7 +133,7 @@ def main():
             for ret in tqdm(pool.imap_unordered(benchmark.eval,
                 trackers), desc='eval eao', total=len(trackers), ncols=100):
                 eao_result.update(ret)
-        ar_benchmark.show_result(ar_result, eao_result,
+        ar_benchmark.show_result(ar_result, report_path, eao_result,
                 show_video_level=args.show_video_level)
     elif 'VOT2018-LT' == args.dataset:
         dataset = VOTLTDataset(args.dataset, root)
