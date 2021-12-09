@@ -41,7 +41,7 @@ required.add_argument('--xcorr', required=True, type=file_path, help="Path to th
 required.add_argument('--dataset', required=True, help="Name of the testing dataset")
 optional.add_argument('--video', default='', help="test one special video")
 required.add_argument('--config', default='', type=file_path, help='path to the config file')
-required.add_argument('--build', default='n', help='(y) ... build and save the engines; (n) ... load saved engines')
+required.add_argument('--precision', default='TF32', help='Specify the precision: TF32, fp16, int8 are supported.')
 args = parser.parse_args()
 
 # You can set the logger severity higher to suppress messages (or lower to display more messages).
@@ -57,7 +57,7 @@ def GiB(val):
 def to_numpy(tensor):
     return np.ascontiguousarray(tensor.detach().cpu().numpy()) if tensor.requires_grad else np.ascontiguousarray(tensor.cpu().numpy())
 
-def get_engine(model_file, refittable: bool = False):
+def get_engine(model_file, precision, refittable: bool = False):
     """Attempts to load a serialized engine if available, otherwise builds a new TensorRT engine and saves it."""
     file_path = str(model_file).rsplit('.', 1)[0] + ".engine"
     def build_engine():
@@ -67,9 +67,10 @@ def get_engine(model_file, refittable: bool = False):
         parser = trt.OnnxParser(network, TRT_LOGGER)
 
         config.max_workspace_size = GiB(1)
+        config.set_flag(precision)
         if(refittable):
             config.set_flag(trt.BuilderFlag.REFIT)
-            config.set_flag(trt.BuilderFlag.FP16)
+        
         # Load the Onnx model and parse it in order to populate the TensorRT network.
         with open(model_file, 'rb') as model:
             if not parser.parse(model.read()):
@@ -93,10 +94,23 @@ def get_engine(model_file, refittable: bool = False):
         return build_engine()
 
 class TrtModel:
-    def __init__(self, target_net, search_net, xcorr):
-        self.engine_target = get_engine(target_net, refittable=False)
-        self.engine_search = get_engine(search_net, refittable=False)
-        self.engine_xcorr = get_engine(xcorr, refittable=True)
+    def __init__(self, target_net, search_net, xcorr, precision):
+        if precision == 'TF32':
+            self.precision = trt.BuilderFlag.TF32
+            warmup_type = np.float32
+        elif precision == 'fp16':
+            self.precision = trt.BuilderFlag.FP16
+            warmup_type = np.float16
+        elif precision == 'int8':
+            self.precision = trt.BuilderFlag.INT8
+            warmup_type = np.uint8
+        else:
+            self.precision = ''
+            raise ValueError(str(precision) + "is not supported!")
+        
+        self.engine_target = get_engine(target_net, self.precision, refittable=False)
+        self.engine_search = get_engine(search_net, self.precision, refittable=False)
+        self.engine_xcorr = get_engine(xcorr, self.precision, refittable=True)
 
         # Create a Context on this device,
         self.ctx = cuda.Device(0).make_context()
@@ -117,11 +131,11 @@ class TrtModel:
         self.xcorr_inputs, self.xcorr_outputs, self.xcorr_bindings, self.xcorr_stream = common.allocate_buffers(self.engine_xcorr)
 
         # warm up engines:
-        z_crop_ini = np.zeros((1, 3, 127, 127), dtype=np.float16)
+        z_crop_ini = np.zeros((1, 3, 127, 127), dtype=warmup_type)
         self.warmup_engine('target', z_crop_ini)
-        x_crop_ini = np.zeros((1, 3, 255, 255), dtype=np.float16)
+        x_crop_ini = np.zeros((1, 3, 255, 255), dtype=warmup_type)
         self.warmup_engine('search', x_crop_ini)
-        y_crop_ini = np.zeros((1, 6, 256, 29, 29), dtype=np.float16)
+        y_crop_ini = np.zeros((1, 6, 256, 29, 29), dtype=warmup_type)
         self.warmup_engine('xcorr', y_crop_ini)
     
     def cuda_cleanup(self):
@@ -489,7 +503,7 @@ def main():
     logging.debug("Time for loading dataset informations (s): " + str(t_load_dataset))
 
     tic = cv2.getTickCount()
-    trtmodel = TrtModel(args.target_net, args.search_net, args.xcorr)
+    trtmodel = TrtModel(args.target_net, args.search_net, args.xcorr, args.precision)
     t_load_engines = (cv2.getTickCount() - tic)/cv2.getTickFrequency()
     logging.debug("Time for loading/creating trt engines (s): " + str(t_load_engines))
 
