@@ -95,7 +95,7 @@ def get_engine(model_file, precision, refittable: bool = False):
 
 class TrtModel:
     def __init__(self, target_net, search_net, xcorr, precision):
-        if precision == 'TF32':
+        if precision == 'fp32':
             self.precision = trt.BuilderFlag.TF32
             warmup_type = np.float32
         elif precision == 'fp16':
@@ -106,7 +106,7 @@ class TrtModel:
             warmup_type = np.uint8
         else:
             self.precision = ''
-            raise ValueError(str(precision) + "is not supported!")
+            raise ValueError(str(precision) + " is not supported!")
         
         self.engine_target = get_engine(target_net, self.precision, refittable=False)
         self.engine_search = get_engine(search_net, self.precision, refittable=False)
@@ -509,6 +509,8 @@ def main():
 
     tracker = SiamRPNTracker(trtmodel)
 
+    report_lines = []
+
     if args.dataset in ['VOT2016', 'VOT2018', 'VOT2019']:
         for v_idx, video in enumerate(dataset):
             if args.video != '':
@@ -562,11 +564,22 @@ def main():
                         f.write("{:d}\n".format(x))
                     else:
                         f.write(','.join([vot_float2str("%.4f", i) for i in x])+'\n')
-            print('({:3d}) Video: {:12s} Time: {:2.4f}s Speed: {:3.1f}fps Lost: {:d}'.format(
-                    v_idx+1, video.name, toc, idx / toc, lost_number))
+            
+            report_text = '({:3d}) Video: {:12s} Time: {:2.4f}s Speed: {:3.1f}fps Lost: {:d}'.format(
+                    v_idx+1, video.name, toc, idx / toc, lost_number)
+            # print('({:3d}) Video: {:12s} Time: {:2.4f}s Speed: {:3.1f}fps Lost: {:d}'.format(
+            #         v_idx+1, video.name, toc, idx / toc, lost_number))
+            print(report_text)
+            report_lines.append(report_text)
 
     logging.info("FPS: " + str(175/toc))
     trtmodel.cuda_cleanup()
+
+    report_path = os.path.join('results', args.dataset, 'trt_model', 'baseline', 'inference_report.txt')
+    with open(report_path, 'w') as f:
+        for line in report_lines:
+            f.write(line + '\n')
+
     print("\nDone.")
 
 
