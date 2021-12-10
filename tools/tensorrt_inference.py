@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+from datetime import datetime
 
 import numpy as np
 import pycuda.autoinit
@@ -95,7 +96,7 @@ def get_engine(model_file, precision, refittable: bool = False):
 
 class TrtModel:
     def __init__(self, target_net, search_net, xcorr, precision):
-        if precision == 'fp32':
+        if precision == 'fp32' or precision == 'TF32':
             self.precision = trt.BuilderFlag.TF32
             warmup_type = np.float32
         elif precision == 'fp16':
@@ -521,6 +522,7 @@ def main():
             lost_number = 0
             toc = 0
             pred_bboxes = []
+            overlaps = []
             for idx, (img, gt_bbox) in enumerate(video):
                 if len(gt_bbox) == 4:
                     gt_bbox = [gt_bbox[0], gt_bbox[1],
@@ -535,10 +537,12 @@ def main():
                     tracker.init(img, gt_bbox_)
                     pred_bbox = gt_bbox_
                     pred_bboxes.append(1)
+                    overlaps.append('1\n')
                 elif idx > frame_counter:
                     outputs = tracker.track(img)
                     pred_bbox = outputs['bbox']
                     overlap = vot_overlap(pred_bbox, gt_bbox, (img.shape[1], img.shape[0]))
+                    overlaps.append(str(overlap) + '\n')
                     if overlap > 0:
                         # not lost
                         pred_bboxes.append(pred_bbox)
@@ -549,6 +553,7 @@ def main():
                         lost_number += 1
                 else:
                     pred_bboxes.append(0)
+                    overlaps.append('2\n')
                 toc += cv2.getTickCount() - tic
             toc /= cv2.getTickFrequency()
 
@@ -565,6 +570,11 @@ def main():
                     else:
                         f.write(','.join([vot_float2str("%.4f", i) for i in x])+'\n')
             
+            overlaps_path = os.path.join(video_path, '{}_overlaps.txt'.format(video.name))
+            with open(overlaps_path, 'w') as f:
+                for o in overlaps:
+                    f.write(o)
+            
             report_text = '({:3d}) Video: {:12s} Time: {:2.4f}s Speed: {:3.1f}fps Lost: {:d}'.format(
                     v_idx+1, video.name, toc, idx / toc, lost_number)
             # print('({:3d}) Video: {:12s} Time: {:2.4f}s Speed: {:3.1f}fps Lost: {:d}'.format(
@@ -579,6 +589,10 @@ def main():
     with open(report_path, 'w') as f:
         for line in report_lines:
             f.write(line + '\n')
+    
+    now = datetime.now()
+    now = now.strftime("%d_%m_%Y_%H_%M")
+    os.rename(os.path.join('results', args.dataset, 'trt_model'), os.path.join('results', args.dataset, 'trt_model_'+ now))
 
     print("\nDone.")
 
