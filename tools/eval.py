@@ -146,6 +146,17 @@ def main():
                 f1_result.update(ret)
         benchmark.show_result(f1_result,
                 show_video_level=args.show_video_level)
+    elif 'VOT2019-LT' == args.dataset:
+        dataset = VOTLTDataset(args.dataset, root)
+        dataset.set_tracker(tracker_dir, trackers)
+        benchmark = F1Benchmark(dataset)
+        f1_result = {}
+        with Pool(processes=args.num) as pool:
+            for ret in tqdm(pool.imap_unordered(benchmark.eval,
+                trackers), desc='eval f1', total=len(trackers), ncols=100):
+                f1_result.update(ret)
+        benchmark.show_result(f1_result,
+                show_video_level=args.show_video_level)
 
 
 if __name__ == '__main__':
