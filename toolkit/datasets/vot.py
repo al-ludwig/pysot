@@ -176,7 +176,7 @@ class VOTLTVideo(Video):
 class VOTLTDataset(Dataset):
     """
     Args:
-        name: dataset name, 'VOT2018-LT'
+        name: dataset name, 'VOT2018-LT', 'VOT2019-LT'
         dataset_root: dataset root
         load_img: wether to load all imgs
     """
@@ -185,6 +185,9 @@ class VOTLTDataset(Dataset):
         with open(os.path.join(dataset_root, name+'.json'), 'r') as f:
             meta_data = json.load(f)
 
+        # text = open(os.path.join(dataset_root, name+'.json'), 'r')
+        # x = text.read()
+        # meta_data = json.load(x)
         # load videos
         pbar = tqdm(meta_data.keys(), desc='loading '+name, ncols=100)
         self.videos = {}

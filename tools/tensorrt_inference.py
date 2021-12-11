@@ -485,6 +485,111 @@ class SiamRPNTracker:
                 'best_score': best_score
                }
 
+class SiamRPNLTTracker(SiamRPNTracker):
+    def __init__(self, model):
+        super(SiamRPNLTTracker, self).__init__(model)
+        self.longterm_state = False
+
+    def track(self, img):
+        """
+        args:
+            img(np.ndarray): BGR image
+        return:
+            bbox(list):[x, y, width, height]
+        """
+        w_z = self.size[0] + cfg.TRACK.CONTEXT_AMOUNT * np.sum(self.size)
+        h_z = self.size[1] + cfg.TRACK.CONTEXT_AMOUNT * np.sum(self.size)
+        s_z = np.sqrt(w_z * h_z)
+        scale_z = cfg.TRACK.EXEMPLAR_SIZE / s_z
+
+        if self.longterm_state:
+            instance_size = cfg.TRACK.LOST_INSTANCE_SIZE
+        else:
+            instance_size = cfg.TRACK.INSTANCE_SIZE
+
+        score_size = (instance_size - cfg.TRACK.EXEMPLAR_SIZE) // \
+            cfg.ANCHOR.STRIDE + 1 + cfg.TRACK.BASE_SIZE
+        hanning = np.hanning(score_size)
+        window = np.outer(hanning, hanning)
+        window = np.tile(window.flatten(), self.anchor_num)
+        anchors = self.generate_anchor(score_size)
+
+        s_x = s_z * (instance_size / cfg.TRACK.EXEMPLAR_SIZE)
+
+        x_crop = self.get_subwindow(img, self.center_pos, instance_size,
+                                    round(s_x), self.channel_average)
+        
+        self.trtmodel.track(x_crop)
+
+        # self.xcorr[0] = cls
+        # self.xcorr[1] = loc
+        score = self._convert_score(self.trtmodel.cls)
+        pred_bbox = self._convert_bbox(self.trtmodel.loc, self.anchors)
+
+        # outputs = self.model.track(x_crop)
+        # score = self._convert_score(outputs['cls'])
+        # pred_bbox = self._convert_bbox(outputs['loc'], anchors)
+
+        def change(r):
+            return np.maximum(r, 1. / r)
+
+        def sz(w, h):
+            pad = (w + h) * 0.5
+            return np.sqrt((w + pad) * (h + pad))
+
+        # scale penalty
+        s_c = change(sz(pred_bbox[2, :], pred_bbox[3, :]) /
+                     (sz(self.size[0] * scale_z, self.size[1] * scale_z)))
+        # ratio penalty
+        r_c = change((self.size[0] / self.size[1]) /
+                     (pred_bbox[2, :] / pred_bbox[3, :]))
+        penalty = np.exp(-(r_c * s_c - 1) * cfg.TRACK.PENALTY_K)
+        pscore = penalty * score
+
+        # window
+        if not self.longterm_state:
+            pscore = pscore * (1 - cfg.TRACK.WINDOW_INFLUENCE) + \
+                    window * cfg.TRACK.WINDOW_INFLUENCE
+        else:
+            pscore = pscore * (1 - 0.001) + window * 0.001
+        best_idx = np.argmax(pscore)
+
+        bbox = pred_bbox[:, best_idx] / scale_z
+        lr = penalty[best_idx] * score[best_idx] * cfg.TRACK.LR
+
+        best_score = score[best_idx]
+        if best_score >= cfg.TRACK.CONFIDENCE_LOW:
+            cx = bbox[0] + self.center_pos[0]
+            cy = bbox[1] + self.center_pos[1]
+
+            width = self.size[0] * (1 - lr) + bbox[2] * lr
+            height = self.size[1] * (1 - lr) + bbox[3] * lr
+        else:
+            cx = self.center_pos[0]
+            cy = self.center_pos[1]
+
+            width = self.size[0]
+            height = self.size[1]
+
+        self.center_pos = np.array([cx, cy])
+        self.size = np.array([width, height])
+
+        cx, cy, width, height = self._bbox_clip(cx, cy, width,
+                                                height, img.shape[:2])
+        bbox = [cx - width / 2,
+                cy - height / 2,
+                width,
+                height]
+
+        if best_score < cfg.TRACK.CONFIDENCE_LOW:
+            self.longterm_state = True
+        elif best_score > cfg.TRACK.CONFIDENCE_HIGH:
+            self.longterm_state = False
+
+        return {
+                'bbox': bbox,
+                'best_score': best_score
+               }
 
 
 def main():
@@ -581,14 +686,80 @@ def main():
             #         v_idx+1, video.name, toc, idx / toc, lost_number))
             print(report_text)
             report_lines.append(report_text)
+        
+        report_path = os.path.join('results', args.dataset, 'trt_model', 'baseline', 'inference_report.txt')
+        with open(report_path, 'w') as f:
+            for line in report_lines:
+                f.write(line + '\n')
+
+    else:
+        # OPE tracking (OPE ... one pass evaluation -> no re-init)
+        for v_idx, video in enumerate(dataset):
+            if args.video != '':
+                # test one special video
+                if video.name != args.video:
+                    continue
+            toc = 0
+            pred_bboxes = []
+            scores = []
+            track_times = []
+            for idx, (img, gt_bbox) in enumerate(video):
+                tic = cv2.getTickCount()
+                if idx == 0:
+                    cx, cy, w, h = get_axis_aligned_bbox(np.array(gt_bbox))
+                    gt_bbox_ = [cx-(w-1)/2, cy-(h-1)/2, w, h]
+                    tracker.init(img, gt_bbox_)
+                    pred_bbox = gt_bbox_
+                    scores.append(None)
+                    if 'VOT2019-LT' == args.dataset:
+                        pred_bboxes.append([1])
+                    else:
+                        pred_bboxes.append(pred_bbox)
+                else:
+                    outputs = tracker.track(img)
+                    pred_bbox = outputs['bbox']
+                    pred_bboxes.append(pred_bbox)
+                    scores.append(outputs['best_score'])
+                toc += cv2.getTickCount() - tic
+                track_times.append((cv2.getTickCount() - tic)/cv2.getTickFrequency())
+                if idx == 0:
+                    cv2.destroyAllWindows()
+            toc /= cv2.getTickFrequency()
+
+            # save results
+            if 'VOT2019-LT' == args.dataset:
+                video_path = os.path.join('results', args.dataset, 'trt_model',
+                        'longterm', video.name)
+                if not os.path.isdir(video_path):
+                    os.makedirs(video_path)
+                result_path = os.path.join(video_path,
+                        '{}_001.txt'.format(video.name))
+                with open(result_path, 'w') as f:
+                    for x in pred_bboxes:
+                        f.write(','.join([str(i) for i in x])+'\n')
+                result_path = os.path.join(video_path,
+                        '{}_001_confidence.value'.format(video.name))
+                with open(result_path, 'w') as f:
+                    for x in scores:
+                        f.write('\n') if x is None else f.write("{:.6f}\n".format(x))
+                result_path = os.path.join(video_path,
+                        '{}_time.txt'.format(video.name))
+                with open(result_path, 'w') as f:
+                    for x in track_times:
+                        f.write("{:.6f}\n".format(x))
+            
+            report_text = '({:3d}) Video: {:12s} Time: {:5.1f}s Speed: {:3.1f}fps'.format(
+                v_idx+1, video.name, toc, idx / toc)
+            print(report_text)
+            report_lines.append(report_text)
+        
+        report_path = os.path.join('results', args.dataset, 'trt_model', 'longterm', 'inference_report.txt')
+        with open(report_path, 'w') as f:
+            for line in report_lines:
+                f.write(line + '\n')
 
     logging.info("FPS: " + str(175/toc))
     trtmodel.cuda_cleanup()
-
-    report_path = os.path.join('results', args.dataset, 'trt_model', 'baseline', 'inference_report.txt')
-    with open(report_path, 'w') as f:
-        for line in report_lines:
-            f.write(line + '\n')
     
     now = datetime.now()
     now = now.strftime("%d_%m_%Y_%H_%M")

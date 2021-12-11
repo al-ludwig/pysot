@@ -12,7 +12,7 @@ class DatasetFactory(object):
         """
         Args:
             name: dataset name 'OTB2015', 'LaSOT', 'UAV123', 'NFS240', 'NFS30',
-                'VOT2018', 'VOT2016', 'VOT2018-LT'
+                'VOT2018', 'VOT2016', 'VOT2018-LT', 'VOT2019-LT'
             dataset_root: dataset root
             load_img: wether to load image
         Return:
@@ -31,6 +31,8 @@ class DatasetFactory(object):
         elif 'VOT2018' == name or 'VOT2016' == name or 'VOT2019' == name:
             dataset = VOTDataset(**kwargs)
         elif 'VOT2018-LT' == name:
+            dataset = VOTLTDataset(**kwargs)
+        elif 'VOT2019-LT' == name:
             dataset = VOTLTDataset(**kwargs)
         elif 'TrackingNet' == name:
             dataset = TrackingNetDataset(**kwargs)
