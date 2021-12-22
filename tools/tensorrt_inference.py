@@ -616,6 +616,7 @@ def main():
     tracker = SiamRPNTracker(trtmodel)
 
     report_lines = []
+    speed = []
 
     if args.dataset in ['VOT2016', 'VOT2018', 'VOT2019']:
         for v_idx, video in enumerate(dataset):
@@ -686,11 +687,14 @@ def main():
             #         v_idx+1, video.name, toc, idx / toc, lost_number))
             print(report_text)
             report_lines.append(report_text)
+            speed.append(idx / toc)
         
+        average_speed = sum(speed) / len(speed)
         report_path = os.path.join('results', args.dataset, 'trt_model', 'baseline', 'inference_report.txt')
         with open(report_path, 'w') as f:
             for line in report_lines:
                 f.write(line + '\n')
+            f.write("\n\nAverage Speed: {:3.1f}fps".format(average_speed))
 
     else:
         # OPE tracking (OPE ... one pass evaluation -> no re-init)
@@ -763,7 +767,7 @@ def main():
     
     now = datetime.now()
     now = now.strftime("%d_%m_%Y_%H_%M")
-    os.rename(os.path.join('results', args.dataset, 'trt_model'), os.path.join('results', args.dataset, 'trt_model_'+ now))
+    os.rename(os.path.join('results', args.dataset, 'trt_model'), os.path.join('results', args.dataset, 'trt_model_'+ str(args.precision) + "_" + now))
 
     print("\nDone.")
 
