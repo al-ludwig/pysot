@@ -57,6 +57,9 @@ def main():
                                             dataset_root=dataset_root,
                                             load_img=False)
 
+    report_lines = []
+    speed = []
+
     model_name = args.snapshot.split('/')[-1].split('.')[0]
     total_lost = 0
     if args.dataset in ['VOT2016', 'VOT2018', 'VOT2019']:
@@ -129,10 +132,19 @@ def main():
                         f.write("{:d}\n".format(x))
                     else:
                         f.write(','.join([vot_float2str("%.4f", i) for i in x])+'\n')
-            print('({:3d}) Video: {:12s} Time: {:4.1f}s Speed: {:3.1f}fps Lost: {:d}'.format(
-                    v_idx+1, video.name, toc, idx / toc, lost_number))
+            report_text = '({:3d}) Video: {:12s} Time: {:4.1f}s Speed: {:3.1f}fps Lost: {:d}'.format(
+                    v_idx+1, video.name, toc, idx / toc, lost_number)
+            print(report_text)
+            report_lines.append(report_text)
+            speed.append(idx / toc)
             total_lost += lost_number
         print("{:s} total lost: {:d}".format(model_name, total_lost))
+        average_speed = sum(speed) / len(speed)
+        report_path = os.path.join('results', args.dataset, 'baseline', 'inference_report.txt')
+        with open(report_path, 'w') as f:
+            for line in report_lines:
+                f.write(line + '\n')
+            f.write("\n\nAverage Speed: {:3.1f}fps".format(average_speed))
     else:
         # OPE tracking
         for v_idx, video in enumerate(dataset):
