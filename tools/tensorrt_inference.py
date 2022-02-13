@@ -12,6 +12,7 @@ import torch
 # sys.path.insert(0, '/usr/lib/python3.6/dist-packages/tensorrt-7.1.3.0.dist-info/')
 import tensorrt as trt
 import logging
+import glob
 
 from PIL import Image
 import common
@@ -43,6 +44,7 @@ required.add_argument('--dataset', required=True, help="Name of the testing data
 optional.add_argument('--video', default='', help="test one special video")
 required.add_argument('--config', default='', type=file_path, help='path to the config file')
 required.add_argument('--precision', default='TF32', help='Specify the precision: TF32, fp16, int8 are supported.')
+optional.add_argument('--calibration_path', default='', help='Set the path to the calibration images')
 args = parser.parse_args()
 
 # You can set the logger severity higher to suppress messages (or lower to display more messages).
@@ -68,10 +70,23 @@ def get_engine(model_file, precision, refittable: bool = False):
         parser = trt.OnnxParser(network, TRT_LOGGER)
 
         config.max_workspace_size = GiB(1)
+        if precision == trt.BuilderFlag.INT8:
+            NUM_IMAGES_PER_BATCH = 1
+            if 'target' in model_file:
+                dir_name = args.dataset + '_int8cal_target'
+            elif 'search' in model_file:
+                dir_name = args.dataset + '_int8cal_search'
+            elif 'xcorr' in model_file:
+                dir_name = args.dataset + '_int8cal_xcorr'
+            else:
+                logging.error("Unsupported name of onnx/enginge models.")
+                return 
+            calibration_files = get_calibration_files(os.path.join(args.calibration_path, dir_name))
+            config.int8_calibrator = ImagenetCalibrator(calibration_files, NUM_IMAGES_PER_BATCH)
+            
         config.set_flag(precision)
         if(refittable):
             config.set_flag(trt.BuilderFlag.REFIT)
-        
         # Load the Onnx model and parse it in order to populate the TensorRT network.
         with open(model_file, 'rb') as model:
             if not parser.parse(model.read()):
@@ -93,6 +108,119 @@ def get_engine(model_file, precision, refittable: bool = False):
             return runtime.deserialize_cuda_engine(f.read())
     else:
         return build_engine()
+
+def get_calibration_files(calibration_data, allowed_extensions=(".jpeg", ".jpg", ".png", ".npy")):
+    """Returns a list of all filenames ending with `allowed_extensions` found in the `calibration_data` directory.
+    Parameters
+    ----------
+    calibration_data: str
+        Path to directory containing desired files.
+    Returns
+    -------
+    calibration_files: List[str]
+         List of filenames contained in the `calibration_data` directory ending with `allowed_extensions`.
+    """
+
+    print("Collecting calibration files from: {:}".format(calibration_data))
+    calibration_files = [path for path in glob.iglob(os.path.join(calibration_data, "**"), recursive=True)
+                         if os.path.isfile(path) and path.lower().endswith(allowed_extensions)]
+    print("Number of Calibration Files found: {:}".format(len(calibration_files)))
+
+    if len(calibration_files) == 0:
+        raise Exception("ERROR: Calibration data path [{:}] contains no files!".format(calibration_data))
+
+    return calibration_files
+
+# https://docs.nvidia.com/deeplearning/sdk/tensorrt-api/python_api/infer/Int8/EntropyCalibrator2.html
+class ImagenetCalibrator(trt.IInt8EntropyCalibrator2):
+    """INT8 Calibrator Class for Imagenet-based Image Classification Models.
+    Parameters
+    ----------
+    calibration_files: List[str]
+        List of image filenames to use for INT8 Calibration
+    batch_size: int
+        Number of images to pass through in one batch during calibration
+    input_shape: Tuple[int]
+        Tuple of integers defining the shape of input to the model (Default: (3, 224, 224))
+    cache_file: str
+        Name of file to read/write calibration cache from/to.
+    preprocess_func: function -> numpy.ndarray
+        Pre-processing function to run on calibration data. This should match the pre-processing
+        done at inference time. In general, this function should return a numpy array of
+        shape `input_shape`.
+    """
+
+    def __init__(self, calibration_files=[], batch_size=32, input_shape=(1, 3, 127, 127),
+                 cache_file="calibration.cache", preprocess_func=None):
+        # super().__init__()
+        trt.IInt8EntropyCalibrator2.__init__(self)
+        self.input_shape = input_shape
+        self.cache_file = cache_file
+        self.batch_size = batch_size
+        self.batch = np.zeros((self.batch_size, *self.input_shape), dtype=np.float32)
+        self.device_input = cuda.mem_alloc(self.batch.nbytes)
+
+        self.files = calibration_files
+        # Pad the list so it is a multiple of batch_size
+        if len(self.files) % self.batch_size != 0:
+            print("Padding # calibration files to be a multiple of batch_size {:}".format(self.batch_size))
+            self.files += calibration_files[(len(calibration_files) % self.batch_size):self.batch_size]
+
+        self.batches = self.load_batches()
+
+        if preprocess_func is None:
+            print("No preprocess_func defined! Please provide one to the constructor.")
+        else:
+            self.preprocess_func = preprocess_func
+
+    def load_batches(self):
+        # Populates a persistent self.batch buffer with images.
+        for index in range(0, len(self.files), self.batch_size):
+            for offset in range(self.batch_size):
+                ext = os.path.splitext(self.files[index + offset])[-1].lower()
+                if ext == 'jpg' or ext == 'jpeg':
+                    image = Image.open(self.files[index + offset])
+                    image = np.array(image)
+                elif ext == 'npy':
+                    image = np.load(self.files[index + offset])
+                else:
+                    logging.error("File type of calibration images is not supported!")
+                    return None
+                
+                image = image.transpose(2, 0, 1)
+                image = image[np.newaxis, :, :, :]
+                image = image.astype(np.float32)
+                self.batch[offset] = image
+                # self.batch[offset] = self.preprocess_func(image, *self.input_shape)
+            print("Calibration images pre-processed: {:}/{:}".format(index+self.batch_size, len(self.files)))
+            yield self.batch
+
+    def get_batch_size(self):
+        return self.batch_size
+
+    def get_batch(self, names):
+        try:
+            # Assume self.batches is a generator that provides batch data.
+            batch = next(self.batches)
+            # Assume that self.device_input is a device buffer allocated by the constructor.
+            cuda.memcpy_htod(self.device_input, batch)
+            return [int(self.device_input)]
+        except StopIteration:
+            # When we're out of batches, we return either [] or None.
+            # This signals to TensorRT that there is no calibration data remaining.
+            return None
+
+    def read_calibration_cache(self):
+        # If there is a cache, use it instead of calibrating again. Otherwise, implicitly return None.
+        if os.path.exists(self.cache_file):
+            with open(self.cache_file, "rb") as f:
+                print("Using calibration cache to save time: {:}".format(self.cache_file))
+                return f.read()
+
+    def write_calibration_cache(self, cache):
+        with open(self.cache_file, "wb") as f:
+            print("Caching calibration data for future use: {:}".format(self.cache_file))
+            f.write(cache)
 
 class TrtModel:
     def __init__(self, target_net, search_net, xcorr, precision):
