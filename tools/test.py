@@ -140,7 +140,7 @@ def main():
             total_lost += lost_number
         print("{:s} total lost: {:d}".format(model_name, total_lost))
         average_speed = sum(speed) / len(speed)
-        report_path = os.path.join('results', args.dataset, 'baseline', 'inference_report.txt')
+        report_path = os.path.join('results', args.dataset, 'model', 'baseline', 'inference_report.txt')
         with open(report_path, 'w') as f:
             for line in report_lines:
                 f.write(line + '\n')
