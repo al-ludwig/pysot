@@ -9,6 +9,7 @@ from pysot.utils.model_load import load_pretrain
 from pysot.models.model_builder import ModelBuilder
 from pysot.core.config import cfg
 from pysot.models.backbone.resnet_atrous import ResNet, Bottleneck
+from pysot.models.backbone.mobile_v2 import MobileNetV2
 from pysot.models.head.rpn import RPN
 from toolkit.utils.region import vot_overlap, vot_float2str
 
@@ -34,6 +35,9 @@ required = parser.add_argument_group('required arguments')
 optional = parser.add_argument_group('optional arguments')
 required.add_argument('--snapshot', required=True, type=file_path, help="Path to the model file (.pth)")
 optional.add_argument('--vis', action='store_true', help='whether visualzie result')
+optional.add_argument('--track', action='store_true', help='whether tracking should be done too')
+required.add_argument('--config', required=True, type=file_path, help='path to config file')
+required.add_argument('--backbone', required=True, help='Which backbone? e,g. resnet, mobile_v2')
 args = parser.parse_args()
 
 
@@ -428,14 +432,19 @@ class SiamRPNTracker(SiameseTracker):
                }
 
 class TargetNetBuilder(nn.Module):
-    def __init__(self):
+    def __init__(self, backbone, cfg):
         super(TargetNetBuilder, self).__init__()
         # Build Backbone Model
-        self.backbone = ResNet(Bottleneck, [3,4,6,3], [2,3,4])
+        if 'resnet' in backbone.lower():
+            self.backbone = ResNet(Bottleneck, [3,4,6,3], [2,3,4])
+        elif 'mobile_v2' in backbone.lower():
+            self.backbone = MobileNetV2(**cfg.BACKBONE.KWARGS)
+        else:
+            return None
         # Build Neck Model
-        self.neck = AdjustAllLayer_1([512,1024,2048], [256,256,256])
+        self.neck = AdjustAllLayer_1(**cfg.ADJUST.KWARGS)
         # Build Corr_prep Target Model
-        self.xcorr_prep = XCorrPrepTarget(anchor_num=5, in_channels=[256, 256, 256])
+        self.xcorr_prep = XCorrPrepTarget(anchor_num=cfg.RPN.KWARGS.anchor_num, in_channels=cfg.RPN.KWARGS.in_channels)
     
     def forward(self, frame):
         features = self.backbone(frame)
@@ -448,14 +457,19 @@ class TargetNetBuilder(nn.Module):
         return output
 
 class SearchNetBuilder(nn.Module):
-    def __init__(self):
+    def __init__(self, backbone, cfg):
         super(SearchNetBuilder, self).__init__()
         # Build Backbone Model
-        self.backbone = ResNet(Bottleneck, [3,4,6,3], [2,3,4])
+        if 'resnet' in backbone.lower():
+            self.backbone = ResNet(Bottleneck, [3,4,6,3], [2,3,4])
+        elif 'mobile_v2' in backbone.lower():
+            self.backbone = MobileNetV2(**cfg.BACKBONE.KWARGS)
+        else:
+            return None
         # Build Neck Model
-        self.neck = AdjustAllLayer_2([512,1024,2048], [256,256,256])
+        self.neck = AdjustAllLayer_2(**cfg.ADJUST.KWARGS)
         # Build Corr_prep Search Model
-        self.xcorr_prep = XCorrPrepSearch(anchor_num=5, in_channels=[256, 256, 256])
+        self.xcorr_prep = XCorrPrepSearch(anchor_num=cfg.RPN.KWARGS.anchor_num, in_channels=cfg.RPN.KWARGS.in_channels)
         
     def forward(self, frame):
         features = self.backbone(frame)
@@ -621,10 +635,13 @@ def main():
     cur_dir = os.path.dirname(os.path.realpath(__file__))
     dataset_root = os.path.join(cur_dir, '../testing_dataset', dataset_name)
 
-    # load config
-    config = '.\\experiments\\siamrpn_r50_l234_dwxcorr\\config.yaml'
+    backbone = 'mobile_v2'
+
+    # load config 
+    # config = '.\\experiments\\siamrpn_r50_l234_dwxcorr\\config.yaml'
+    # config = '.\\experiments\\siamrpn_mobilev2_l234_dwxcorr\\config.yaml'
     # config = '..\\experiments\\siamrpn_r50_l234_dwxcorr\\config.yaml'
-    cfg.merge_from_file(config)
+    cfg.merge_from_file(args.config)
 
     # create dataset
     dataset = DatasetFactory.create_dataset(name=dataset_name,
@@ -643,7 +660,7 @@ def main():
 
     #===================================================================================================================
     # Build the torch backbone model
-    target_net = TargetNetBuilder()
+    target_net = TargetNetBuilder(args.backbone, cfg)
     target_net.eval()
     target_net.state_dict().keys()
     target_net_dict = target_net.state_dict()
@@ -683,7 +700,7 @@ def main():
     # tmp_pretrained = list(pretrained_dict)[250:]
 
     # Export the torch target net model to ONNX model
-    # torch.onnx.export(target_net, torch.Tensor(target), "target_net4refit2.onnx", export_params=True,input_names=['input'], output_names=['kernel_cls2', 'kernel_cls3', 'kernel_cls4', 'kernel_loc2', 'kernel_loc3', 'kernel_loc4'])
+    torch.onnx.export(target_net, torch.Tensor(target), "target_net4refit2.onnx", export_params=True,input_names=['input'], output_names=['kernel_cls2', 'kernel_cls3', 'kernel_cls4', 'kernel_loc2', 'kernel_loc3', 'kernel_loc4'])
     
     # Load the saved torch target net model using ONNX
     # onnx_target = onnx.load("target_net4refit.onnx")
@@ -697,12 +714,11 @@ def main():
 
     #===================================================================================================================
     # Build the torch backbone model
-    search_net = SearchNetBuilder()
+    search_net = SearchNetBuilder(args.backbone, cfg)
     search_net.eval()
     search_net.state_dict().keys()
     search_net_dict = search_net.state_dict()
 
-    search = search_net.forward(search)
     tmp_search_net = list(search_net_dict)[250:]
 
     # Load the pre-trained weight to the torch target net model
@@ -732,11 +748,13 @@ def main():
 
     search_net_dict.update(pretrained_dict_search)
     search_net.load_state_dict(search_net_dict)
-    search_net.cuda()
+    # search_net.cuda()
 
     # Export the torch search net model to ONNX model
-    # torch.onnx.export(search_net, torch.Tensor(search), "search_net4refit2.onnx", export_params=True, 
-    #               input_names=['input'], output_names=['search_cls2', 'search_cls3', 'search_cls4', 'search_loc2', 'search_loc3', 'search_loc4'])
+    torch.onnx.export(search_net, torch.Tensor(search), "search_net4refit2.onnx", export_params=True, 
+                  input_names=['input'], output_names=['search_cls2', 'search_cls3', 'search_cls4', 'search_loc2', 'search_loc3', 'search_loc4'])
+    
+    search = search_net.forward(search)
 
     # Load the saved torch search net model using ONNX
     # onnx_search = onnx.load("search_net4refit.onnx")
@@ -809,6 +827,9 @@ def main():
     # onnx.helper.printable_graph(onnx_rpn_head_model.graph)
     # print(onnx.helper.printable_graph(onnx_rpn_head_model.graph))
     #===================================================================================================================
+
+    if args.track == False:
+        return
 
     tracker = SiamRPNTracker(target_net, search_net, xcorr)
 
