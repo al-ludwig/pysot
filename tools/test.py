@@ -7,6 +7,7 @@ from __future__ import unicode_literals
 
 import argparse
 import os
+from datetime import datetime
 
 import cv2
 import torch
@@ -73,6 +74,7 @@ def main():
             lost_number = 0
             toc = 0
             pred_bboxes = []
+            overlaps = []
             for idx, (img, gt_bbox) in enumerate(video):
                 if len(gt_bbox) == 4:
                     gt_bbox = [gt_bbox[0], gt_bbox[1],
@@ -86,22 +88,26 @@ def main():
                     tracker.init(img, gt_bbox_)
                     pred_bbox = gt_bbox_
                     pred_bboxes.append(1)
+                    overlaps.append('1\n')
                 elif idx > frame_counter:
                     outputs = tracker.track(img)
                     pred_bbox = outputs['bbox']
                     if cfg.MASK.MASK:
                         pred_bbox = outputs['polygon']
                     overlap = vot_overlap(pred_bbox, gt_bbox, (img.shape[1], img.shape[0]))
+                    overlaps.append(str(overlap) + '\n')
                     if overlap > 0:
                         # not lost
                         pred_bboxes.append(pred_bbox)
                     else:
                         # lost object
                         pred_bboxes.append(2)
+                        overlaps.append('2\n')
                         frame_counter = idx + 5 # skip 5 frames
                         lost_number += 1
                 else:
                     pred_bboxes.append(0)
+                    overlaps.append('0\n')
                 toc += cv2.getTickCount() - tic
                 if idx == 0:
                     cv2.destroyAllWindows()
@@ -132,6 +138,12 @@ def main():
                         f.write("{:d}\n".format(x))
                     else:
                         f.write(','.join([vot_float2str("%.4f", i) for i in x])+'\n')
+            
+            overlaps_path = os.path.join(video_path, '{}_overlaps.txt'.format(video.name))
+            with open(overlaps_path, 'w') as f:
+                for o in overlaps:
+                    f.write(o)
+
             report_text = '({:3d}) Video: {:12s} Time: {:4.1f}s Speed: {:3.1f}fps Lost: {:d}'.format(
                     v_idx+1, video.name, toc, idx / toc, lost_number)
             print(report_text)
@@ -233,6 +245,9 @@ def main():
             print('({:3d}) Video: {:12s} Time: {:5.1f}s Speed: {:3.1f}fps'.format(
                 v_idx+1, video.name, toc, idx / toc))
 
+    now = datetime.now()
+    now = now.strftime("%d_%m_%Y_%H_%M")
+    os.rename(os.path.join('results', args.dataset, 'model'), os.path.join('results', args.dataset, 'model_' + now))
 
 if __name__ == '__main__':
     main()
