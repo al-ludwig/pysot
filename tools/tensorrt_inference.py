@@ -783,11 +783,12 @@ def main():
                     else:
                         # lost object
                         pred_bboxes.append(2)
+                        overlaps.append('2\n')
                         frame_counter = idx + 5 # skip 5 frames
                         lost_number += 1
                 else:
                     pred_bboxes.append(0)
-                    overlaps.append('2\n')
+                    overlaps.append('0\n')
                 toc += cv2.getTickCount() - tic
             toc /= cv2.getTickFrequency()
 
