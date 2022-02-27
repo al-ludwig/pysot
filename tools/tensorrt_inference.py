@@ -43,7 +43,7 @@ required.add_argument('--xcorr', required=True, type=file_path, help="Path to th
 required.add_argument('--dataset', required=True, help="Name of the testing dataset")
 optional.add_argument('--video', default='', help="test one special video")
 required.add_argument('--config', default='', type=file_path, help='path to the config file')
-required.add_argument('--precision', default='TF32', help='Specify the precision: TF32, fp16, int8 are supported.')
+required.add_argument('--precision', default='FP32', help='Specify the precision: FP32, FP16, int8 are supported.')
 optional.add_argument('--calibration_path', default='', help='Set the path to the calibration images')
 args = parser.parse_args()
 
@@ -224,13 +224,13 @@ class ImagenetCalibrator(trt.IInt8EntropyCalibrator2):
 
 class TrtModel:
     def __init__(self, target_net, search_net, xcorr, precision):
-        if precision == 'fp32' or precision == 'TF32':
+        if precision.lower() == 'fp32':
             self.precision = trt.BuilderFlag.TF32
             warmup_type = np.float32
-        elif precision == 'fp16':
+        elif precision.lower() == 'fp16':
             self.precision = trt.BuilderFlag.FP16
             warmup_type = np.float16
-        elif precision == 'int8':
+        elif precision.lower() == 'int8':
             self.precision = trt.BuilderFlag.INT8
             warmup_type = np.uint8
         else:
@@ -315,23 +315,24 @@ class TrtModel:
         logging.debug("Refitting xcorr-engine ...")
         refitter = trt.Refitter(self.engine_xcorr, TRT_LOGGER)
 
-        # dw_xcorr_cls2 = '1'
-        # dw_xcorr_cls3 = '3'
-        # dw_xcorr_cls4 = '5'
-        # dw_xcorr_loc2 = '2'
-        # dw_xcorr_loc3 = '4'
-        # dw_xcorr_loc4 = '6'
-        conv_names = ['1', '2', '3', '4', '5', '6']
+        logging.debug("Refittable weights:")
+        refittable_weights = refitter.get_all_weights()
+        logging.debug(refittable_weights)
+        conv_names = ['dwxcorr.dw_xcorr_cls2.weight', 'dwxcorr.dw_xcorr_loc2.weight', 'dwxcorr.dw_xcorr_cls3.weight', 'dwxcorr.dw_xcorr_loc3.weight', 'dwxcorr.dw_xcorr_cls4.weight', 'dwxcorr.dw_xcorr_loc4.weight']
+        tmp = [i for i in refittable_weights if i in conv_names]
+
+        if len(tmp) != len(conv_names):
+            # older opset version may not use 'names' for the layers
+            # dw_xcorr_cls2 = '1', dw_xcorr_cls3 = '3', dw_xcorr_cls4 = '5'
+            # dw_xcorr_loc2 = '2', dw_xcorr_loc3 = '4', dw_xcorr_loc4 = '6'
+            conv_names = ['1', '2', '3', '4', '5', '6']
+        
         for name, kernel in zip(conv_names, self.kernels):
-            # refitter.set_weights(name, trt.WeightsRole.KERNEL, kernel)
             refitter.set_named_weights(name, kernel)
         missing_weights = refitter.get_missing_weights()
-        assert len(
-            missing_weights) == 0, "Refitter found missing weights. Call set_named_weights() or set_weights() for all missing weights"
+        assert len(missing_weights) == 0, "Refitter found missing weights. Call set_named_weights() for all missing weights"
         refitter.refit_cuda_engine()
-
         logging.debug("Refitting xcorr-engine done.")
-
     
     def track(self, x_crop):
         # Make self the active context, pushing it on top of the context stack.
