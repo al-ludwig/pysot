@@ -95,10 +95,10 @@ def main():
                     if cfg.MASK.MASK:
                         pred_bbox = outputs['polygon']
                     overlap = vot_overlap(pred_bbox, gt_bbox, (img.shape[1], img.shape[0]))
-                    overlaps.append(str(overlap) + '\n')
                     if overlap > 0:
                         # not lost
                         pred_bboxes.append(pred_bbox)
+                        overlaps.append(str(overlap) + '\n')
                     else:
                         # lost object
                         pred_bboxes.append(2)

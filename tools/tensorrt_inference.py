@@ -62,7 +62,7 @@ def to_numpy(tensor):
 
 def get_engine(model_file, precision, refittable: bool = False):
     """Attempts to load a serialized engine if available, otherwise builds a new TensorRT engine and saves it."""
-    file_path = str(model_file).rsplit('.', 1)[0] + ".engine"
+    file_path = str(model_file).rsplit('.', 1)[0] + str(args.precision.lower()) + ".engine"
     def build_engine():
         builder = trt.Builder(TRT_LOGGER)
         network = builder.create_network(EXPLICIT_BATCH)
@@ -777,10 +777,10 @@ def main():
                     outputs = tracker.track(img)
                     pred_bbox = outputs['bbox']
                     overlap = vot_overlap(pred_bbox, gt_bbox, (img.shape[1], img.shape[0]))
-                    overlaps.append(str(overlap) + '\n')
                     if overlap > 0:
                         # not lost
                         pred_bboxes.append(pred_bbox)
+                        overlaps.append(str(overlap) + '\n')
                     else:
                         # lost object
                         pred_bboxes.append(2)
