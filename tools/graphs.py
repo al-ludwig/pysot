@@ -55,6 +55,42 @@ def fps_eao():
     # plt.show()
     plt.savefig(os.path.join(args.output, 'fps_eao_' + str(get_timestamp()) + '.png'))
 
+def fps_eao_mixed_precision():
+    # naming convention: targe_net / search_net / xcorr
+    fps = {
+        'fp32/fp32/fp16': 12.9,
+        'fp32/fp16/fp32': 33.6,
+        'fp32/fp16/fp16': 41.8,
+        'fp16/fp32/fp32': 12.8,
+        'fp16/fp32/fp16': 12.8,
+        'fp16/fp16/fp32': 41.6,
+        'fp32/fp32/fp32': 13.1,
+        'fp16/fp16/fp16': 49.9,
+        #'int8': 65.7
+    }
+    eao = {
+        'fp32/fp32/fp16': 0.367,
+        'fp32/fp16/fp32': 0.389,
+        'fp32/fp16/fp16': 0.388,
+        'fp16/fp32/fp32': 0.394,
+        'fp16/fp32/fp16': 0.395,
+        'fp16/fp16/fp32': 0.396,
+        'fp32/fp32/fp32': 0.392,
+        'fp16/fp16/fp16': 0.389,
+        #'int8': 0.347
+    }
+
+    markers = split_list(Line2D.filled_markers)
+    plt.ylabel('EAO')
+    plt.xlabel('FPS')
+    plt.grid(linestyle='dashed')
+    for f in fps:
+        plt.plot(fps[f], eao[f], marker=markers[1][list(fps.keys()).index(f)], label=f, linestyle='None')
+    plt.legend(title='target_net/search_net/xcorr')
+    plt.title('Performance on Xavier, VOT2018 dataset')
+    # plt.show()
+    plt.savefig(os.path.join(args.output, 'fps_eao_mixed_precision' + str(get_timestamp()) + '.png'))
+
 def ar_raw(args):
     acc = {
         'pytorch_resnet50_fp32': 0.602,
@@ -205,6 +241,8 @@ def main(args):
         eao_challenges()
     elif args.type == 'overlap_video':
         overlap_video()
+    elif args.type == 'fps_eao_mixed_precision':
+        fps_eao_mixed_precision()
     else:
         print('ERROR: Type "' + str(args.type) + '" is not supported!')
     return
