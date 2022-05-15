@@ -29,8 +29,9 @@ class ModelBuilder(nn.Module):
                                  **cfg.ADJUST.KWARGS)
 
         # build rpn head
-        self.rpn_head = get_rpn_head(cfg.RPN.TYPE,
-                                     **cfg.RPN.KWARGS)
+        if cfg.RPN.RPN:
+            self.rpn_head = get_rpn_head(cfg.RPN.TYPE,
+                                        **cfg.RPN.KWARGS)
 
         # build mask head
         if cfg.MASK.MASK:

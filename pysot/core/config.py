@@ -205,6 +205,8 @@ __C.RPN = CN()
 # RPN type
 __C.RPN.TYPE = 'MultiRPN'
 
+__C.RPN.RPN = True
+
 __C.RPN.KWARGS = CN(new_allowed=True)
 
 # ------------------------------------------------------------------------ #
