@@ -43,7 +43,6 @@ required.add_argument('--xcorr', required=True, type=file_path, help="Path to th
 required.add_argument('--dataset', required=True, help="Name of the testing dataset")
 optional.add_argument('--video', default='', help="test one special video")
 required.add_argument('--config', default='', type=file_path, help='path to the config file')
-required.add_argument('--precision', default='FP32', help='Specify the precision: FP32, FP16, int8 are supported.')
 optional.add_argument('--calibration_path', default='', help='Set the path to the calibration images')
 args = parser.parse_args()
 
@@ -60,9 +59,8 @@ def GiB(val):
 def to_numpy(tensor):
     return np.ascontiguousarray(tensor.detach().cpu().numpy()) if tensor.requires_grad else np.ascontiguousarray(tensor.cpu().numpy())
 
-def get_engine(model_file, precision, refittable: bool = False):
+def get_engine(model_file, precision_builderflag, refittable: bool = False):
     """Attempts to load a serialized engine if available, otherwise builds a new TensorRT engine and saves it."""
-    file_path = str(model_file).rsplit('.', 1)[0] + str(args.precision.lower()) + ".engine"
     def build_engine():
         builder = trt.Builder(TRT_LOGGER)
         network = builder.create_network(EXPLICIT_BATCH)
@@ -70,7 +68,7 @@ def get_engine(model_file, precision, refittable: bool = False):
         parser = trt.OnnxParser(network, TRT_LOGGER)
 
         config.max_workspace_size = GiB(1)
-        if precision == trt.BuilderFlag.INT8:
+        if precision_builderflag == trt.BuilderFlag.INT8:
             NUM_IMAGES_PER_BATCH = 1
             if 'target' in model_file:
                 dir_name = args.dataset + '_int8cal_target'
@@ -84,7 +82,7 @@ def get_engine(model_file, precision, refittable: bool = False):
             calibration_files = get_calibration_files(os.path.join(args.calibration_path, dir_name))
             config.int8_calibrator = ImagenetCalibrator(calibration_files, NUM_IMAGES_PER_BATCH)
             
-        config.set_flag(precision)
+        config.set_flag(precision_builderflag)
         if(refittable):
             config.set_flag(trt.BuilderFlag.REFIT)
         # Load the Onnx model and parse it in order to populate the TensorRT network.
@@ -94,20 +92,40 @@ def get_engine(model_file, precision, refittable: bool = False):
                 for error in range(parser.num_errors):
                     print (parser.get_error(error))
                 return None
-        
+
         engine = builder.build_engine(network, config)
 
-        with open(file_path, "wb") as f:
+        with open(str(model_file).rsplit('.', 1)[0] + ".engine", "wb") as f:
 	        f.write(engine.serialize())
         return engine
 
-    if os.path.exists(file_path):
-        # If a serialized engine exists, use it instead of building an engine.
-        print("Reading engine from file {}".format(file_path))
-        with open(file_path, "rb") as f:
-            return runtime.deserialize_cuda_engine(f.read())
+    if model_file.endswith('.onnx'):
+        # if a engine with the name already exists -> delete it
+        # if not: create trt engine
+        if os.path.exists(str(model_file).rsplit('.', 1)[0] + ".engine"):
+            logging.info("Found an already existing engine: " + str(model_file).rsplit('.', 1)[0] + ".engine")
+            logging.info("Deleting this engine ...")
+            os.remove(str(model_file).rsplit('.', 1)[0] + ".engine")
+            logging.info(str(model_file).rsplit('.', 1)[0] + ".engine" + " has been deleted.")
+    
+        try:
+            logging.info("Creating trt engine " + str(model_file).rsplit('.', 1)[0] + ".engine")
+            return build_engine()
+        except Exception as e:
+            logging.error("Something wrent wrong while creating the "+ str(model_file).rsplit('.', 1)[0] + ".engine")
+            logging.error("Details: " + str(e))
+    elif model_file.endswith('.engine'):
+        # try to load the engine
+        logging.info("Reading engine from file {}:".format(model_file))
+        try:
+            with open(model_file, "rb") as f:
+                return runtime.deserialize_cuda_engine(f.read())
+        except:
+            logging.error("Something wrent wrong while reading the engine from file {}".format(model_file))
+            sys.exit()
     else:
-        return build_engine()
+        # no valid file ending (onnx or engine)
+        raise ValueError("No valid file ending! Supported file types are .onnx and .engine")
 
 def get_calibration_files(calibration_data, allowed_extensions=(".jpeg", ".jpg", ".png", ".npy")):
     """Returns a list of all filenames ending with `allowed_extensions` found in the `calibration_data` directory.
@@ -222,24 +240,47 @@ class ImagenetCalibrator(trt.IInt8EntropyCalibrator2):
             print("Caching calibration data for future use: {:}".format(self.cache_file))
             f.write(cache)
 
+def get_precision(net_filename):
+    precision_builderflag = None
+    warmup_type = None
+    if 'fp32' in net_filename:
+        precision_builderflag = trt.BuilderFlag.TF32
+        warmup_type = np.float32
+    elif 'fp16' in net_filename:
+        precision_builderflag = trt.BuilderFlag.FP16
+        warmup_type = np.float16
+    elif 'int8' in net_filename:
+        precision_builderflag = trt.BuilderFlag.INT8
+        warmup_type = np.uint8
+    else:
+        raise ValueError("Precision must be part of the net-name, like:\n..._fp32.onnx or ..._fp32.engine\nYour try was: " + str(net_filename))
+    return precision_builderflag, warmup_type
+
 class TrtModel:
-    def __init__(self, target_net, search_net, xcorr, precision):
-        if precision.lower() == 'fp32':
-            self.precision = trt.BuilderFlag.TF32
-            warmup_type = np.float32
-        elif precision.lower() == 'fp16':
-            self.precision = trt.BuilderFlag.FP16
-            warmup_type = np.float16
-        elif precision.lower() == 'int8':
-            self.precision = trt.BuilderFlag.INT8
-            warmup_type = np.uint8
-        else:
-            self.precision = ''
-            raise ValueError(str(precision) + " is not supported!")
+    def __init__(self, target_net, search_net, xcorr):
+        self.precisions = {
+            'target_net': cfg.PRECISION.TARGET_NET,
+            'search_net': cfg.PRECISION.SEARCH_NET,
+            'xcorr': cfg.PRECISION.XCORR
+        }
+
+        target_net_precision_builderflag, target_net_warmup_type = get_precision(target_net)
+        search_net_precision_builderflag, search_net_warmup_type = get_precision(search_net)
+        xcorr_precision_builderflag, xcorr_warmup_type = get_precision(xcorr)
         
-        self.engine_target = get_engine(target_net, self.precision, refittable=False)
-        self.engine_search = get_engine(search_net, self.precision, refittable=False)
-        self.engine_xcorr = get_engine(xcorr, self.precision, refittable=True)
+        try:
+            self.engine_target = get_engine(target_net, target_net_precision_builderflag, refittable=False)
+            self.engine_search = get_engine(search_net, search_net_precision_builderflag, refittable=False)
+            self.engine_xcorr = get_engine(xcorr, xcorr_precision_builderflag, refittable=True)
+        except Exception as e:
+            raise Exception("Something went wrong when getting the engines.\nDetails: " + str(e))
+        
+        if self.engine_target == None:
+            raise Exception("Something went wrong when getting the target-engine.\nPlease look in the trt-log for more details.")
+        if self.engine_search == None:
+            raise Exception("Something went wrong when getting the search-engine.\nPlease look in the trt-log for more details.")
+        if self.engine_xcorr == None:
+            raise Exception("Something went wrong when getting the xcorr_engine.\nPlease look in the trt-log for more details.")
 
         # Create a Context on this device,
         self.ctx = cuda.Device(0).make_context()
@@ -260,11 +301,11 @@ class TrtModel:
         self.xcorr_inputs, self.xcorr_outputs, self.xcorr_bindings, self.xcorr_stream = common.allocate_buffers(self.engine_xcorr)
 
         # warm up engines:
-        z_crop_ini = np.zeros((1, 3, 127, 127), dtype=warmup_type)
+        z_crop_ini = np.zeros((1, 3, 127, 127), dtype=target_net_warmup_type)
         self.warmup_engine('target', z_crop_ini)
-        x_crop_ini = np.zeros((1, 3, 255, 255), dtype=warmup_type)
+        x_crop_ini = np.zeros((1, 3, 255, 255), dtype=search_net_warmup_type)
         self.warmup_engine('search', x_crop_ini)
-        y_crop_ini = np.zeros((1, 6, 256, 29, 29), dtype=warmup_type)
+        y_crop_ini = np.zeros((1, 6, 256, 29, 29), dtype=xcorr_warmup_type)
         self.warmup_engine('xcorr', y_crop_ini)
     
     def cuda_cleanup(self):
@@ -738,7 +779,11 @@ def main():
     logging.debug("Time for loading dataset informations (s): " + str(t_load_dataset))
 
     tic = cv2.getTickCount()
-    trtmodel = TrtModel(args.target_net, args.search_net, args.xcorr, args.precision)
+    try:
+        trtmodel = TrtModel(args.target_net, args.search_net, args.xcorr)
+    except Exception as e:
+        logging.error(e)
+        return
     t_load_engines = (cv2.getTickCount() - tic)/cv2.getTickFrequency()
     logging.debug("Time for loading/creating trt engines (s): " + str(t_load_engines))
 
@@ -903,5 +948,5 @@ def main():
 
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.WARNING)
+    logging.basicConfig(level=logging.INFO)
     main()
