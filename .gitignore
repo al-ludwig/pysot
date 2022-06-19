@@ -109,3 +109,6 @@ experiments
 toolkit/utils/region.c
 
 *.npy
+*.pth
+*.model
+/logs
