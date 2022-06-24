@@ -258,12 +258,6 @@ def get_precision(net_filename):
 
 class TrtModel:
     def __init__(self, target_net, search_net, xcorr):
-        self.precisions = {
-            'target_net': cfg.PRECISION.TARGET_NET,
-            'search_net': cfg.PRECISION.SEARCH_NET,
-            'xcorr': cfg.PRECISION.XCORR
-        }
-
         target_net_precision_builderflag, target_net_warmup_type = get_precision(target_net)
         search_net_precision_builderflag, search_net_warmup_type = get_precision(search_net)
         xcorr_precision_builderflag, xcorr_warmup_type = get_precision(xcorr)
