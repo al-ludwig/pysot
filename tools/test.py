@@ -61,7 +61,7 @@ def main():
     report_lines = []
     speed = []
 
-    model_name = args.snapshot.split('/')[-1].split('.')[0]
+    model_name = os.path.splitext(os.path.basename(args.snapshot))[0]
     total_lost = 0
     if args.dataset in ['VOT2016', 'VOT2018', 'VOT2019']:
         # restart tracking
@@ -86,6 +86,9 @@ def main():
                     cx, cy, w, h = get_axis_aligned_bbox(np.array(gt_bbox))
                     gt_bbox_ = [cx-(w-1)/2, cy-(h-1)/2, w, h]
                     tracker.init(img, gt_bbox_)
+                    # np.save(cur_dir + "\\zf_0.npy", tracker.model.zf[0].cpu().detach().numpy())
+                    # np.save(cur_dir + "\\zf_1.npy", tracker.model.zf[1].cpu().detach().numpy())
+                    # np.save(cur_dir + "\\zf_2.npy", tracker.model.zf[2].cpu().detach().numpy())
                     pred_bbox = gt_bbox_
                     pred_bboxes.append(1)
                     overlaps.append('1\n')
@@ -152,7 +155,7 @@ def main():
             total_lost += lost_number
         print("{:s} total lost: {:d}".format(model_name, total_lost))
         average_speed = sum(speed) / len(speed)
-        report_path = os.path.join('results', args.dataset, 'model', 'baseline', 'inference_report.txt')
+        report_path = os.path.join('results', args.dataset, model_name, 'baseline', 'inference_report.txt')
         with open(report_path, 'w') as f:
             for line in report_lines:
                 f.write(line + '\n')
@@ -201,7 +204,7 @@ def main():
                     cv2.waitKey(1)
             toc /= cv2.getTickFrequency()
             # save results
-            if 'VOT2018-LT' == args.dataset:
+            if args.dataset in ['VOT2018-LT', 'VOT2019-LT']:
                 video_path = os.path.join('results', args.dataset, model_name,
                         'longterm', video.name)
                 if not os.path.isdir(video_path):
@@ -242,8 +245,17 @@ def main():
                 with open(result_path, 'w') as f:
                     for x in pred_bboxes:
                         f.write(','.join([str(i) for i in x])+'\n')
-            print('({:3d}) Video: {:12s} Time: {:5.1f}s Speed: {:3.1f}fps'.format(
-                v_idx+1, video.name, toc, idx / toc))
+            report_text = '({:3d}) Video: {:12s} Time: {:5.1f}s Speed: {:3.1f}fps'.format(
+                v_idx+1, video.name, toc, idx / toc)
+            print(report_text)
+            report_lines.append(report_text)
+            speed.append(idx / toc)
+        average_speed = sum(speed) / len(speed)
+        report_path = os.path.join('results', args.dataset, model_name, 'longterm', 'inference_report.txt')
+        with open(report_path, 'w') as f:
+            for line in report_lines:
+                f.write(line + '\n')
+            f.write("\n\nAverage Speed: {:3.1f}fps".format(average_speed))
 
     now = datetime.now()
     now = now.strftime("%d_%m_%Y_%H_%M")
