@@ -7,6 +7,12 @@ import shutil
 import time
 import warnings
 from enum import Enum
+import logging
+from datetime import datetime
+
+from pysot.models.model_builder import ModelBuilder
+from pysot.core.config import cfg
+from pysot.utils.log_helper import init_log, add_file_handler
 
 import torch
 import torch.nn as nn
@@ -26,6 +32,7 @@ model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
 
+logger = logging.getLogger('global')
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument('data', metavar='DIR', default='imagenet',
                     help='path to dataset (default: imagenet)')
@@ -59,7 +66,7 @@ parser.add_argument('--resume', default='', type=str, metavar='PATH',
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
 parser.add_argument('--pretrained', dest='pretrained', action='store_true',
-                    help='use pre-trained model')
+                    help='path to pre-trained model')
 parser.add_argument('--world-size', default=-1, type=int,
                     help='number of nodes for distributed training')
 parser.add_argument('--rank', default=-1, type=int,
@@ -77,12 +84,38 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'N processes per node, which has N GPUs. This is the '
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
+parser.add_argument('--pysot', type=str, default=None, help='path to the pysot backbone with fc')
+parser.add_argument('--config', type=str, default=None, help='path to the pysot config (yaml)')
+parser.add_argument('--log', type=str, default=None, help="path to where the log shall be saved")
+parser.add_argument('--out-name', type=str, default='checkpoint', help="specify the name of the output pth file")
 
 best_acc1 = 0
 
 
+class BackboneBuilder(ModelBuilder):
+    def __init__(self):
+        super(BackboneBuilder, self).__init__()
+    
+    # override:
+    def forward(self, data):
+        return self.backbone(data)
+
+
 def main():
     args = parser.parse_args()
+    options = vars(args)
+
+    if args.log is None:
+        print("ERROR: Give a path to the log dir! Exiting ...")
+        return
+    init_log('global', logging.INFO)
+    now = datetime.now()
+    now = now.strftime("%d_%m_%Y_%H_%M")
+    add_file_handler('global', os.path.join(args.log, now + '_log.txt'),
+                             logging.INFO)
+    logger.info("Start of backbone training.")
+    logger.info("Passed arguments:")
+    logger.info(options)
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -121,7 +154,7 @@ def main_worker(gpu, ngpus_per_node, args):
     args.gpu = gpu
 
     if args.gpu is not None:
-        print("Use GPU: {} for training".format(args.gpu))
+        logger.info("Use GPU: {} for training".format(args.gpu))
 
     if args.distributed:
         if args.dist_url == "env://" and args.rank == -1:
@@ -133,15 +166,35 @@ def main_worker(gpu, ngpus_per_node, args):
         dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
                                 world_size=args.world_size, rank=args.rank)
     # create model
-    if args.pretrained:
-        print("=> using pre-trained model '{}'".format(args.arch))
+    if args.pysot is not None:
+        logger.info("Loading pysot backbone snapshot: {}".format(args.pysot))
+        logger.info("Config from: {}".format(args.config))
+        cfg.merge_from_file(args.config)
+        snapshot = torch.load(args.pysot)
+
+        pysot_model = BackboneBuilder()
+        # logger.info(snapshot['state_dict'].keys())
+        # for key in list(snapshot['state_dict'].keys()):
+        #     if not key.startswith('backbone'):
+        #         del snapshot[key]
+        pysot_model.backbone.load_state_dict(snapshot['state_dict'], strict=False)
+        model = pysot_model.backbone
+
+        # freeze everything except avgpool and fc
+        not_freeze = ['avgpool', 'fc']
+        for module in model._modules:
+            if module not in not_freeze:
+                getattr(model, module).requires_grad_(False)
+        logger.info("Pysot backbone loading finished.")
+    elif args.pretrained:
+        logger.info("=> using pre-trained model '{}'".format(args.arch))
         model = models.__dict__[args.arch](pretrained=True)
     else:
-        print("=> creating model '{}'".format(args.arch))
+        logger.info("=> creating model '{}'".format(args.arch))
         model = models.__dict__[args.arch]()
 
     if not torch.cuda.is_available():
-        print('using CPU, this will be slow')
+        logger.info('using CPU, this will be slow')
     elif args.distributed:
         # For multiprocessing distributed, DistributedDataParallel constructor
         # should always set the single device scope, otherwise,
@@ -180,6 +233,7 @@ def main_worker(gpu, ngpus_per_node, args):
     
     """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
     scheduler = StepLR(optimizer, step_size=30, gamma=0.1)
+    logger.info("Loss function, optimizer and learning rate defined.")
     
     # optionally resume from a checkpoint
     if args.resume:
@@ -207,6 +261,7 @@ def main_worker(gpu, ngpus_per_node, args):
     cudnn.benchmark = True
 
     # Data loading code
+    logger.info("Loading imagenet dataset from: {}".format(args.data))
     traindir = os.path.join(args.data, 'train')
     valdir = os.path.join(args.data, 'val')
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
@@ -229,6 +284,7 @@ def main_worker(gpu, ngpus_per_node, args):
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
         num_workers=args.workers, pin_memory=True, sampler=train_sampler)
+    logger.info("Loading training dataset complete.")
 
     val_loader = torch.utils.data.DataLoader(
         datasets.ImageFolder(valdir, transforms.Compose([
@@ -239,6 +295,7 @@ def main_worker(gpu, ngpus_per_node, args):
         ])),
         batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers, pin_memory=True)
+    logger.info("Loading validation dataset complete.")
 
     if args.evaluate:
         validate(val_loader, model, criterion, args)
@@ -270,7 +327,7 @@ def main_worker(gpu, ngpus_per_node, args):
                 'best_acc1': best_acc1,
                 'optimizer' : optimizer.state_dict(),
                 'scheduler' : scheduler.state_dict()
-            }, is_best)
+            }, is_best, filename='../checkpoints/' + args.out_name + '.pth')
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
@@ -317,7 +374,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         end = time.time()
 
         if i % args.print_freq == 0:
-            progress.display(i)
+            logger.info(progress.display(i))
 
 
 def validate(val_loader, model, criterion, args):
@@ -356,9 +413,9 @@ def validate(val_loader, model, criterion, args):
             end = time.time()
 
             if i % args.print_freq == 0:
-                progress.display(i)
+                logger.info(progress.display(i))
 
-        progress.display_summary()
+        logger.info(progress.display_summary())
 
     return top1.avg
 
@@ -423,12 +480,14 @@ class ProgressMeter(object):
     def display(self, batch):
         entries = [self.prefix + self.batch_fmtstr.format(batch)]
         entries += [str(meter) for meter in self.meters]
-        print('\t'.join(entries))
+        # print('\t'.join(entries))
+        return '\t'.join(entries)
         
     def display_summary(self):
         entries = [" *"]
         entries += [meter.summary() for meter in self.meters]
-        print(' '.join(entries))
+        # print(' '.join(entries))
+        return ' '.join(entries)
 
     def _get_batch_fmtstr(self, num_batches):
         num_digits = len(str(num_batches // 1))
@@ -454,3 +513,4 @@ def accuracy(output, target, topk=(1,)):
 
 if __name__ == '__main__':
     main()
+    logger.info("End of script.")
