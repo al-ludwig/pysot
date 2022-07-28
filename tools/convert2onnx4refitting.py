@@ -1,7 +1,9 @@
 import os
+import sys
 import argparse
 import numpy as np
 import logging
+from datetime import datetime
 
 from pysot.core.config import cfg
 from pysot.models.backbone.resnet_atrous import ResNet, Bottleneck
@@ -10,6 +12,7 @@ from pysot.models.head.rpn import RPN
 
 import torch
 from torch import nn
+import onnx
 
 # argparse check function
 def file_path(path):
@@ -25,6 +28,8 @@ required = parser.add_argument_group('required arguments')
 optional = parser.add_argument_group('optional arguments')
 required.add_argument('--snapshot', required=True, type=file_path, help="Path to the model file (.pth)")
 required.add_argument('--config', required=True, type=file_path, help='path to config file')
+optional.add_argument('--opset_version', type=int, default=15, help='set the onnx opset_version (default = 17)')
+optional.add_argument('--logtofile', action='store_true', default=False, help='save log to file (Bool)')
 args = parser.parse_args()
 
 
@@ -270,20 +275,23 @@ class SearchNetBuilder(nn.Module):
 
 class DepthwiseXCorr(nn.Module):
     "Depthwise Correlation Layer"
-    def __init__(self, in_channels):
+    def __init__(self, in_channels, out_channels_cls, out_channels_loc):
         super(DepthwiseXCorr, self).__init__()
+        self.in_channels = in_channels
+        self.out_channels_cls = out_channels_cls
+        self.out_channels_loc = out_channels_loc
         for i in range(len(in_channels)):
-            self.add_module('dw_xcorr_cls'+str(i+2), nn.Conv2d(in_channels[i], in_channels[i], kernel_size=(5,5), bias=False, groups=in_channels[i]))
-            self.add_module('dw_xcorr_loc'+str(i+2), nn.Conv2d(in_channels[i], in_channels[i], kernel_size=(5,5), bias=False, groups=in_channels[i]))
+            self.add_module('dw_xcorr_cls'+str(i+2), nn.Conv2d(self.in_channels[i], self.in_channels[i], kernel_size=(5,5), bias=False, groups=self.in_channels[i]))
+            self.add_module('dw_xcorr_loc'+str(i+2), nn.Conv2d(self.in_channels[i], self.in_channels[i], kernel_size=(5,5), bias=False, groups=self.in_channels[i]))
     
     def init(self, kernel):
         "initialize the conv weights with the output from target_net"
-        kernel[0] = kernel[0].view(256, 1, 5, 5)
-        kernel[1] = kernel[1].view(256, 1, 5, 5)
-        kernel[2] = kernel[2].view(256, 1, 5, 5)
-        kernel[3] = kernel[3].view(256, 1, 5, 5)
-        kernel[4] = kernel[4].view(256, 1, 5, 5)
-        kernel[5] = kernel[5].view(256, 1, 5, 5)
+        kernel[0] = kernel[0].view(self.in_channels[0], 1, self.out_channels_cls, self.out_channels_cls)
+        kernel[1] = kernel[1].view(self.in_channels[0], 1, self.out_channels_loc, self.out_channels_loc)
+        kernel[2] = kernel[2].view(self.in_channels[1], 1, self.out_channels_cls, self.out_channels_cls)
+        kernel[3] = kernel[3].view(self.in_channels[1], 1, self.out_channels_loc, self.out_channels_loc)
+        kernel[4] = kernel[4].view(self.in_channels[1], 1, self.out_channels_cls, self.out_channels_cls)
+        kernel[5] = kernel[5].view(self.in_channels[1], 1, self.out_channels_loc, self.out_channels_loc)
         self.dw_xcorr_cls2.weight = nn.Parameter(kernel[0])
         self.dw_xcorr_cls3.weight = nn.Parameter(kernel[2])
         self.dw_xcorr_cls4.weight = nn.Parameter(kernel[4])
@@ -291,104 +299,88 @@ class DepthwiseXCorr(nn.Module):
         self.dw_xcorr_loc3.weight = nn.Parameter(kernel[3])
         self.dw_xcorr_loc4.weight = nn.Parameter(kernel[5])
     
-    def forward(self, search):
+    def forward(self, search_cls2, search_cls3, search_cls4, search_loc2, search_loc3, search_loc4):
         cls = []
         loc = []
-        cls_i = self.dw_xcorr_cls2(search[0])
-        cls_i = cls_i.view(1, 256, cls_i.size(2), cls_i.size(3))
+        cls_i = self.dw_xcorr_cls2(search_cls2)
+        cls_i = cls_i.view(1, self.in_channels[0], cls_i.size(2), cls_i.size(3))
         cls.append(cls_i)
-        loc_i = self.dw_xcorr_loc2(search[1])
-        loc_i = loc_i.view(1, 256, loc_i.size(2), loc_i.size(3))
+        loc_i = self.dw_xcorr_loc2(search_loc2)
+        loc_i = loc_i.view(1, self.in_channels[0], loc_i.size(2), loc_i.size(3))
         loc.append(loc_i)
-        cls_i = self.dw_xcorr_cls3(search[2])
-        cls_i = cls_i.view(1, 256, cls_i.size(2), cls_i.size(3))
+        cls_i = self.dw_xcorr_cls3(search_cls3)
+        cls_i = cls_i.view(1, self.in_channels[1], cls_i.size(2), cls_i.size(3))
         cls.append(cls_i)
-        loc_i = self.dw_xcorr_loc3(search[3])
-        loc_i = loc_i.view(1, 256, loc_i.size(2), loc_i.size(3))
+        loc_i = self.dw_xcorr_loc3(search_loc3)
+        loc_i = loc_i.view(1, self.in_channels[1], loc_i.size(2), loc_i.size(3))
         loc.append(loc_i)
-        cls_i = self.dw_xcorr_cls4(search[4])
-        cls_i = cls_i.view(1, 256, cls_i.size(2), cls_i.size(3))
+        cls_i = self.dw_xcorr_cls4(search_cls4)
+        cls_i = cls_i.view(1, self.in_channels[2], cls_i.size(2), cls_i.size(3))
         cls.append(cls_i)
-        loc_i = self.dw_xcorr_loc4(search[5])
-        loc_i = loc_i.view(1, 256, loc_i.size(2), loc_i.size(3))
+        loc_i = self.dw_xcorr_loc4(search_loc4)
+        loc_i = loc_i.view(1, self.in_channels[2], loc_i.size(2), loc_i.size(3))
         loc.append(loc_i)
         return cls, loc
 
 
 class XCorrBuilder(nn.Module):
-    def __init__(self, hidden, out_channels_cls, out_channels_loc):
+    def __init__(self, in_channels, anchor_num=5):
         super(XCorrBuilder, self).__init__()
         # depthwise xcorrelation with z as kernel
-        self.dwxcorr = DepthwiseXCorr([hidden, hidden, hidden])
+        out_channels_cls = 2 * anchor_num
+        out_channels_loc = 4 * anchor_num
+        self.dwxcorr = DepthwiseXCorr(in_channels, out_channels_cls, out_channels_loc)
         # head 1x1 conv
         self.head_cls2 = nn.Sequential(
-                nn.Conv2d(hidden, hidden, kernel_size=1, bias=False),
-                nn.BatchNorm2d(hidden),
+                nn.Conv2d(in_channels[0], in_channels[0], kernel_size=1, bias=False),
+                nn.BatchNorm2d(in_channels[0]),
                 nn.ReLU(inplace=True),
-                nn.Conv2d(hidden, out_channels_cls, kernel_size=1)
+                nn.Conv2d(in_channels[0], out_channels_cls, kernel_size=1)
                 )
         self.head_cls3 = nn.Sequential(
-                nn.Conv2d(hidden, hidden, kernel_size=1, bias=False),
-                nn.BatchNorm2d(hidden),
+                nn.Conv2d(in_channels[1], in_channels[1], kernel_size=1, bias=False),
+                nn.BatchNorm2d(in_channels[1]),
                 nn.ReLU(inplace=True),
-                nn.Conv2d(hidden, out_channels_cls, kernel_size=1)
+                nn.Conv2d(in_channels[1], out_channels_cls, kernel_size=1)
                 )
         self.head_cls4 = nn.Sequential(
-                nn.Conv2d(hidden, hidden, kernel_size=1, bias=False),
-                nn.BatchNorm2d(hidden),
+                nn.Conv2d(in_channels[2], in_channels[2], kernel_size=1, bias=False),
+                nn.BatchNorm2d(in_channels[2]),
                 nn.ReLU(inplace=True),
-                nn.Conv2d(hidden, out_channels_cls, kernel_size=1)
+                nn.Conv2d(in_channels[2], out_channels_cls, kernel_size=1)
                 )
         self.head_loc2 = nn.Sequential(
-                nn.Conv2d(hidden, hidden, kernel_size=1, bias=False),
-                nn.BatchNorm2d(hidden),
+                nn.Conv2d(in_channels[0], in_channels[0], kernel_size=1, bias=False),
+                nn.BatchNorm2d(in_channels[0]),
                 nn.ReLU(inplace=True),
-                nn.Conv2d(hidden, out_channels_loc, kernel_size=1)
+                nn.Conv2d(in_channels[0], out_channels_loc, kernel_size=1)
                 )
         self.head_loc3 = nn.Sequential(
-                nn.Conv2d(hidden, hidden, kernel_size=1, bias=False),
-                nn.BatchNorm2d(hidden),
+                nn.Conv2d(in_channels[1], in_channels[1], kernel_size=1, bias=False),
+                nn.BatchNorm2d(in_channels[1]),
                 nn.ReLU(inplace=True),
-                nn.Conv2d(hidden, out_channels_loc, kernel_size=1)
+                nn.Conv2d(in_channels[1], out_channels_loc, kernel_size=1)
                 )
         self.head_loc4 = nn.Sequential(
-                nn.Conv2d(hidden, hidden, kernel_size=1, bias=False),
-                nn.BatchNorm2d(hidden),
+                nn.Conv2d(in_channels[2], in_channels[2], kernel_size=1, bias=False),
+                nn.BatchNorm2d(in_channels[2]),
                 nn.ReLU(inplace=True),
-                nn.Conv2d(hidden, out_channels_loc, kernel_size=1)
+                nn.Conv2d(in_channels[2], out_channels_loc, kernel_size=1)
                 )
-        weight_cls2 = nn.Parameter(torch.Tensor([0.38156851768108546]))
-        weight_cls3 = nn.Parameter(torch.Tensor([0.4364767608115956]))
-        weight_cls4 = nn.Parameter(torch.Tensor([0.18195472150731892]))
-        weight_loc2 = nn.Parameter(torch.Tensor([0.17644893463361863]))
-        weight_loc3 = nn.Parameter(torch.Tensor([0.16564198028417967]))
-        weight_loc4 = nn.Parameter(torch.Tensor([0.6579090850822015]))
-        self.weight_cls = [weight_cls2, weight_cls3, weight_cls4]
-        self.weight_loc = [weight_loc2, weight_loc3, weight_loc4]
     
     def init(self, kernel):
         # set kernel as weights for depthwise xcorrelation
         self.dwxcorr.init(kernel)
     
-    def forward(self, search):
-        cls, loc = self.dwxcorr(search)
+    def forward(self, search_cls2, search_cls3, search_cls4, search_loc2, search_loc3, search_loc4):
+        cls, loc = self.dwxcorr(search_cls2, search_cls3, search_cls4, search_loc2, search_loc3, search_loc4)
         cls[0] = self.head_cls2(cls[0])
         cls[1] = self.head_cls3(cls[1])
         cls[2] = self.head_cls4(cls[2])
         loc[0] = self.head_loc2(loc[0])
         loc[1] = self.head_loc3(loc[1])
         loc[2] = self.head_loc4(loc[2])
-        
-        def avg(lst):
-            return sum(lst) / len(lst)
-        
-        def weighted_avg(lst, weight):
-            s = 0
-            fixed_len = 3
-            for i in range(3):
-                s += lst[i] * weight[i]
-            return s
-        # return weighted_avg(cls, self.weight_cls), weighted_avg(loc, self.weight_loc)
+
         return cls, loc
 
 class RPNBuilder(nn.Module):
@@ -404,9 +396,25 @@ class RPNBuilder(nn.Module):
 
         return cls, loc
 
-
 def main():
     logging.info("Start of onnx conversion.")
+    logging.info("Printing version info:")
+    versions = {}
+    for module in sys.modules:
+        try:
+            versions[module] = sys.modules[module].__version__
+        except:
+            try:
+                if type(sys.modules[module].version) is str:
+                    versions[module] = sys.modules[module].version
+                else:
+                    versions[module] = sys.modules[module].version()
+            except:
+                try:
+                    versions[module] = sys.modules[module].VERSION
+                except:
+                    pass
+    logging.info(versions)
 
     # load config 
     cfg.merge_from_file(args.config)
@@ -460,19 +468,29 @@ def main():
     target_net.load_state_dict(target_net_dict)
     # target_net.cuda()
 
-    # tmp_target_net = list(target_net_dict)[250:]
-    # tmp_pretrained = list(pretrained_dict)[250:]
-
     # Export the torch target net model to ONNX model
     logging.info("Export the target_net model ...")
-    torch.onnx.export(target_net, torch.Tensor(target), "target_net4refit.onnx", export_params=True,input_names=['input'], output_names=['kernel_cls2', 'kernel_cls3', 'kernel_cls4', 'kernel_loc2', 'kernel_loc3', 'kernel_loc4'])
+    try:
+        torch.onnx.export(target_net, torch.Tensor(target), "target_net4refit.onnx", export_params=True,input_names=['input'], output_names=['kernel_cls2', 'kernel_cls3', 'kernel_cls4', 'kernel_loc2', 'kernel_loc3', 'kernel_loc4'], opset_version = args.opset_version)
+    except Exception as e:
+        logging.error("Exporting of target_net model failed. Details:")
+        logging.error(e)
+        logging.info("Exiting ...")
+        sys.exit()
     logging.info("Export the target_net model DONE.")
 
     # Check whether the ONNX target net model has been successfully imported
-    # onnx.checker.check_model(onnx_target)
-    # print(onnx.checker.check_model(onnx_target))
-    # onnx.helper.printable_graph(onnx_target.graph)
-    # print(onnx.helper.printable_graph(onnx_target.graph))
+    onnx_target = onnx.load("target_net4refit.onnx")
+    try:
+        onnx.checker.check_model(onnx_target)
+    except Exception as e:
+        logging.error("Checking of the target_net onnx model failed. Details:")
+        logging.error(e)
+        logging.info("Exiting ...")
+        sys.exit()
+    logging.info("The target_net onnx model is successfully checked.")
+    # the loaded onnx model can now be deleted as it is not needed anymore
+    del onnx_target
     #===================================================================================================================
 
     #===================================================================================================================
@@ -514,23 +532,38 @@ def main():
 
     # Export the torch search net model to ONNX model
     logging.info("Export the search_net model ...")
-    torch.onnx.export(search_net, torch.Tensor(search), "search_net4refit.onnx", export_params=True, 
-                  input_names=['input'], output_names=['search_cls2', 'search_cls3', 'search_cls4', 'search_loc2', 'search_loc3', 'search_loc4'])
+    try:
+        torch.onnx.export(search_net, torch.Tensor(search), "search_net4refit.onnx", export_params=True, 
+                  input_names=['input'], output_names=['search_cls2', 'search_cls3', 'search_cls4', 'search_loc2', 'search_loc3', 'search_loc4'], opset_version = args.opset_version)
+    except Exception as e:
+        logging.error("Exporting of search_net model failed. Details:")
+        logging.error(e)
+        logging.info("Exiting ...")
+        sys.exit()
     logging.info("Export the search_net model DONE.")
 
-    search = search_net.forward(search)
+    # Check whether the ONNX search net model has been successfully imported
+    onnx_search = onnx.load("search_net4refit.onnx")
+    try:
+        onnx.checker.check_model(onnx_search)
+    except Exception as e:
+        logging.error("Checking of the search_net onnx model failed. Details:")
+        logging.error(e)
+        logging.info("Exiting ...")
+        sys.exit()
+    logging.info("The search_net onnx model is successfully checked.")
+    # the loaded onnx model can now be deleted as it is not needed anymore
+    del onnx_search
 
-    # Check whether the ONNX target net model has been successfully imported
-    # onnx.checker.check_model(onnx_search)
-    # print(onnx.checker.check_model(onnx_search))
-    # onnx.helper.printable_graph(onnx_search.graph)
-    # print(onnx.helper.printable_graph(onnx_search.graph))
+    # get the output of the search_net because it is needed when exporting the xcorr net
+    search = search_net.forward(search)
     #===================================================================================================================
 
     #===================================================================================================================
     # Build the torch xcorr model
     logging.info("Build the xcorr model")
-    xcorr = XCorrBuilder(256, 10, 20)
+    # xcorr = XCorrBuilder(256, 10, 20)
+    xcorr = XCorrBuilder(cfg.RPN.KWARGS.in_channels, cfg.RPN.KWARGS.anchor_num)
     xcorr.eval()
     xcorr.state_dict().keys()
     xcorr_dict = xcorr.state_dict()
@@ -561,21 +594,39 @@ def main():
     xcorr.load_state_dict(xcorr_dict)
     # xcorr.cuda()
 
-    search_s = np.stack([search[0].detach().numpy(), search[1].detach().numpy(), search[2].detach().numpy(), search[3].detach().numpy(), search[4].detach().numpy(), search[5].detach().numpy()])
     # # Export the torch rpn_head model to ONNX model
     logging.info("Export the xcorr model ...")
-    torch.onnx.export(xcorr, (torch.Tensor(np.random.rand(*search_s.shape))), "xcorr4refit.onnx", export_params=True, input_names = ['input'], output_names = ['cls2', 'cls3', 'cls4', 'loc2', 'loc3', 'loc4'])
+    try:
+        torch.onnx.export(xcorr, (search[0], search[1], search[2], search[3], search[4], search[5], {}), "xcorr4refit.onnx", export_params=True, input_names = ['search_cls2', 'search_cls3', 'search_cls4', 'search_loc2', 'search_loc3', 'search_loc4'], output_names = ['cls2', 'cls3', 'cls4', 'loc2', 'loc3', 'loc4'], opset_version = args.opset_version)
+    except Exception as e:
+        logging.error("Exporting of xcorr model failed. Details:")
+        logging.error(e)
+        logging.info("Exiting ...")
+        sys.exit()
     logging.info("Export the xcorr model DONE.")
 
-    # Check whether the rpn_head model has been successfully imported
-    # onnx.checker.check_model(onnx_rpn_head_model)
-    # print(onnx.checker.check_model(onnx_rpn_head_model))    
-    # onnx.helper.printable_graph(onnx_rpn_head_model.graph)
-    # print(onnx.helper.printable_graph(onnx_rpn_head_model.graph))
+    # Check whether the rpn_head model (xcorr) has been successfully imported
+    onnx_xcorr = onnx.load("xcorr4refit.onnx")
+    try:
+        onnx.checker.check_model(onnx_xcorr)
+    except Exception as e:
+        logging.error("Checking of the xcorr onnx model failed. Details:")
+        logging.error(e)
+        logging.info("Exiting ...")
+        sys.exit()
+    logging.info("The xcorr onnx model is successfully checked.") 
+    del onnx_xcorr
     #===================================================================================================================
 
     logging.info("DONE.")
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
+    now = datetime.now()
+    now = now.strftime("%d_%m_%Y_%H_%M")
+    logging_path = "convert2onnx_LOG_" + now + ".txt"
+    logging_level = logging.INFO
+    log_handlers = [logging.StreamHandler()]
+    if args.logtofile:
+        log_handlers.append(logging.FileHandler(logging_path))
+    logging.basicConfig(level=logging_level, format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s', datefmt='%H:%M:%S', handlers=log_handlers)     
     main()
