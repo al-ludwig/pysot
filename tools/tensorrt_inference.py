@@ -24,6 +24,8 @@ from pysot.utils.anchor import Anchors
 from pysot.utils.bbox import get_axis_aligned_bbox
 from toolkit.utils.region import vot_overlap, vot_float2str
 
+debug = False
+valid_log_levels = ['CRITICAL', 'ERROR', 'WARNING', 'INFO', 'DEBUG']
 
 # argparse check function
 def file_path(path):
@@ -37,17 +39,23 @@ parser = argparse.ArgumentParser(description='Script for running tracker with on
 parser._action_groups.pop()
 required = parser.add_argument_group('required arguments')
 optional = parser.add_argument_group('optional arguments')
-required.add_argument('--target_net', required=True, type=file_path, help="Path to the target net file (.onnx)")
-required.add_argument('--search_net', required=True, type=file_path, help="Path to the search net file (.onnx)")
-required.add_argument('--xcorr', required=True, type=file_path, help="Path to the xcorr net file (.onnx)")
+required.add_argument('--target_net', required=True, type=file_path, help="Path to the target net ().onnx or -engine)")
+required.add_argument('--search_net', required=True, type=file_path, help="Path to the search net (.onnx or .engine)")
+required.add_argument('--xcorr', required=True, type=file_path, help="Path to the xcorr net (.onnx or .engine)")
+optional.add_argument('--target_net_pr', default='fp32', choices=['fp32', 'fp16', 'int8'], help="Set the precision of the target_net engine. Will be ignored when loading an engine directly.")
+optional.add_argument('--search_net_pr', default='fp32', choices=['fp32', 'fp16', 'int8'], help="Set the precision of the search_net engine. Will be ignored when loading an engine directly.")
+optional.add_argument('--xcorr_pr', default='fp32', choices=['fp32', 'fp16', 'int8'], help="Set the precision of the xcorr engine. Will be ignored when loading an engine directly.")
 required.add_argument('--dataset', required=True, help="Name of the testing dataset")
 optional.add_argument('--video', default='', help="test one special video")
 required.add_argument('--config', default='', type=file_path, help='path to the config file')
 optional.add_argument('--calibration_path', default='', help='Set the path to the calibration images')
+optional.add_argument('--logtofile', action='store_true', default=False, help='save log to file (Bool)')
+optional.add_argument('--warmUp', default=5, type=int, help='Specify the number of warm-up runs per engine (default=5)')
+optional.add_argument('--log', default='info', help='Set the logging level (' + str(valid_log_levels) + ')')
 args = parser.parse_args()
 
 # You can set the logger severity higher to suppress messages (or lower to display more messages).
-TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
+TRT_LOGGER = trt.Logger(trt.Logger.INFO)
 
 EXPLICIT_BATCH = 1 << (int)(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
 
@@ -59,16 +67,29 @@ def GiB(val):
 def to_numpy(tensor):
     return np.ascontiguousarray(tensor.detach().cpu().numpy()) if tensor.requires_grad else np.ascontiguousarray(tensor.cpu().numpy())
 
-def get_engine(model_file, precision_builderflag, refittable: bool = False):
+def get_precision_builderflag(arg):
+    precision_builderflag = None
+    if 'fp32' in arg:
+        precision_builderflag = trt.BuilderFlag.TF32
+    elif 'fp16' in arg:
+        precision_builderflag = trt.BuilderFlag.FP16
+    elif 'int8' in arg:
+        precision_builderflag = trt.BuilderFlag.INT8
+    return precision_builderflag
+
+def get_engine(model_file, precision, refittable: bool = False):
     """Attempts to load a serialized engine if available, otherwise builds a new TensorRT engine and saves it."""
     def build_engine():
         builder = trt.Builder(TRT_LOGGER)
         network = builder.create_network(EXPLICIT_BATCH)
         config = builder.create_builder_config()
         parser = trt.OnnxParser(network, TRT_LOGGER)
+        precision_builderflag = get_precision_builderflag(precision)
 
         config.max_workspace_size = GiB(1)
         if precision_builderflag == trt.BuilderFlag.INT8:
+            if not args.calibration_path:
+                raise Exception("No calibration path given!.")
             NUM_IMAGES_PER_BATCH = 1
             if 'target' in model_file:
                 dir_name = args.dataset + '_int8cal_target'
@@ -95,7 +116,7 @@ def get_engine(model_file, precision_builderflag, refittable: bool = False):
 
         engine = builder.build_engine(network, config)
 
-        with open(str(model_file).rsplit('.', 1)[0] + ".engine", "wb") as f:
+        with open(str(model_file).rsplit('.', 1)[0] + "_" + precision + ".engine", "wb") as f:
 	        f.write(engine.serialize())
         return engine
 
@@ -109,7 +130,7 @@ def get_engine(model_file, precision_builderflag, refittable: bool = False):
             logging.info(str(model_file).rsplit('.', 1)[0] + ".engine" + " has been deleted.")
     
         try:
-            logging.info("Creating trt engine " + str(model_file).rsplit('.', 1)[0] + ".engine")
+            logging.info("Creating trt engine " + str(model_file).rsplit('.', 1)[0] + "_" + precision + ".engine")
             return build_engine()
         except Exception as e:
             logging.error("Something wrent wrong while creating the "+ str(model_file).rsplit('.', 1)[0] + ".engine")
@@ -139,13 +160,13 @@ def get_calibration_files(calibration_data, allowed_extensions=(".jpeg", ".jpg",
          List of filenames contained in the `calibration_data` directory ending with `allowed_extensions`.
     """
 
-    print("Collecting calibration files from: {:}".format(calibration_data))
+    logging.info("Collecting calibration files from: {:}".format(calibration_data))
     calibration_files = [path for path in glob.iglob(os.path.join(calibration_data, "**"), recursive=True)
                          if os.path.isfile(path) and path.lower().endswith(allowed_extensions)]
-    print("Number of Calibration Files found: {:}".format(len(calibration_files)))
+    logging.info("Number of Calibration Files found: {:}".format(len(calibration_files)))
 
     if len(calibration_files) == 0:
-        raise Exception("ERROR: Calibration data path [{:}] contains no files!".format(calibration_data))
+        raise Exception("Calibration data path [{:}] contains no files!".format(calibration_data))
 
     return calibration_files
 
@@ -196,13 +217,13 @@ class ImagenetCalibrator(trt.IInt8EntropyCalibrator2):
         for index in range(0, len(self.files), self.batch_size):
             for offset in range(self.batch_size):
                 ext = os.path.splitext(self.files[index + offset])[-1].lower()
-                if ext == 'jpg' or ext == 'jpeg':
+                if ext == '.jpg' or ext == '.jpeg':
                     image = Image.open(self.files[index + offset])
                     image = np.array(image)
-                elif ext == 'npy':
+                elif ext == '.npy':
                     image = np.load(self.files[index + offset])
                 else:
-                    logging.error("File type of calibration images is not supported!")
+                    logging.error("File type of calibration images is not supported! Given filetype: " + str(ext))
                     return None
                 
                 image = image.transpose(2, 0, 1)
@@ -210,7 +231,7 @@ class ImagenetCalibrator(trt.IInt8EntropyCalibrator2):
                 image = image.astype(np.float32)
                 self.batch[offset] = image
                 # self.batch[offset] = self.preprocess_func(image, *self.input_shape)
-            print("Calibration images pre-processed: {:}/{:}".format(index+self.batch_size, len(self.files)))
+            logging.info("Calibration images pre-processed: {:}/{:}".format(index+self.batch_size, len(self.files)))
             yield self.batch
 
     def get_batch_size(self):
@@ -240,32 +261,13 @@ class ImagenetCalibrator(trt.IInt8EntropyCalibrator2):
             print("Caching calibration data for future use: {:}".format(self.cache_file))
             f.write(cache)
 
-def get_precision(net_filename):
-    precision_builderflag = None
-    warmup_type = None
-    if 'fp32' in net_filename:
-        precision_builderflag = trt.BuilderFlag.TF32
-        warmup_type = np.float32
-    elif 'fp16' in net_filename:
-        precision_builderflag = trt.BuilderFlag.FP16
-        warmup_type = np.float16
-    elif 'int8' in net_filename:
-        precision_builderflag = trt.BuilderFlag.INT8
-        warmup_type = np.uint8
-    else:
-        raise ValueError("Precision must be part of the net-name, like:\n..._fp32.onnx or ..._fp32.engine\nYour try was: " + str(net_filename))
-    return precision_builderflag, warmup_type
-
 class TrtModel:
-    def __init__(self, target_net, search_net, xcorr):
-        target_net_precision_builderflag, target_net_warmup_type = get_precision(target_net)
-        search_net_precision_builderflag, search_net_warmup_type = get_precision(search_net)
-        xcorr_precision_builderflag, xcorr_warmup_type = get_precision(xcorr)
-        
+    def __init__(self, target_net, search_net, xcorr):      
+        logging.info("Creating tensorrt engines ...")
         try:
-            self.engine_target = get_engine(target_net, target_net_precision_builderflag, refittable=False)
-            self.engine_search = get_engine(search_net, search_net_precision_builderflag, refittable=False)
-            self.engine_xcorr = get_engine(xcorr, xcorr_precision_builderflag, refittable=True)
+            self.engine_target = get_engine(target_net, args.target_net_pr, refittable=False)
+            self.engine_search = get_engine(search_net, args.search_net_pr, refittable=False)
+            self.engine_xcorr = get_engine(xcorr, args.xcorr_pr, refittable=True)
         except Exception as e:
             raise Exception("Something went wrong when getting the engines.\nDetails: " + str(e))
         
@@ -275,9 +277,8 @@ class TrtModel:
             raise Exception("Something went wrong when getting the search-engine.\nPlease look in the trt-log for more details.")
         if self.engine_xcorr == None:
             raise Exception("Something went wrong when getting the xcorr_engine.\nPlease look in the trt-log for more details.")
+        logging.info("Creating tensorrt engines successfully completed.")
 
-        # Create a Context on this device,
-        self.ctx = cuda.Device(0).make_context()
 
         self.engine_target_context =self.engine_target.create_execution_context()
         self.engine_search_context =self.engine_search.create_execution_context()
@@ -290,45 +291,46 @@ class TrtModel:
         # placeholder for xcorr results
         self.xcorr = None
 
-        self.target_inputs, self.target_outputs, self.target_bindings, self.target_stream = common.allocate_buffers(self.engine_target)
-        self.search_inputs, self.search_outputs, self.search_bindings, self.search_stream = common.allocate_buffers(self.engine_search)
-        self.xcorr_inputs, self.xcorr_outputs, self.xcorr_bindings, self.xcorr_stream = common.allocate_buffers(self.engine_xcorr)
+        self.target_host_inputs, self.target_cuda_inputs, self.target_host_outputs, self.target_cuda_outputs, self.target_bindings, self.target_stream = common.allocate_buffers(self.engine_target)
+        self.search_host_inputs, self.search_cuda_inputs, self.search_host_outputs, self.search_cuda_outputs, self.search_bindings, self.search_stream = common.allocate_buffers(self.engine_search)
+        self.xcorr_host_inputs, self.xcorr_cuda_inputs, self.xcorr_host_outputs, self.xcorr_cuda_outputs, self.xcorr_bindings, self.xcorr_stream = common.allocate_buffers(self.engine_xcorr)
 
         # warm up engines:
-        z_crop_ini = np.zeros((1, 3, 127, 127), dtype=target_net_warmup_type)
+        logging.info("Warming up target engine ...")
+        z_crop_ini = np.zeros((1, 3, 127, 127), dtype=np.float32)
         self.warmup_engine('target', z_crop_ini)
-        x_crop_ini = np.zeros((1, 3, 255, 255), dtype=search_net_warmup_type)
+
+        logging.info("Warming up search engine ...")
+        x_crop_ini = np.zeros((1, 3, 255, 255), dtype=np.float32)
         self.warmup_engine('search', x_crop_ini)
-        y_crop_ini = np.zeros((1, 6, 256, 29, 29), dtype=xcorr_warmup_type)
+
+        logging.info("Warming up xcorr engine ...")
+        # xcorr sequence is:
+        # cls2, cls3, cls4, loc2, loc3, loc4
+        y_crop_ini = [np.zeros((1, int(cfg.RPN.KWARGS.in_channels[0]), 29, 29), dtype=np.float32), np.zeros((1, int(cfg.RPN.KWARGS.in_channels[1]), 29, 29), dtype=np.float32), np.zeros((1, int(cfg.RPN.KWARGS.in_channels[2]), 29, 29), dtype=np.float32)]
         self.warmup_engine('xcorr', y_crop_ini)
-    
-    def cuda_cleanup(self):
-        self.ctx.pop()
+        logging.info("warmup engines (" + str(args.warmUp) + " runs each) finished")
     
     def warmup_engine(self, name, ini_crop):
-        # Make self the active context, pushing it on top of the context stack.
-        self.ctx.push()
         if name == 'target':
-            np.copyto(self.target_inputs[0].host, np.ascontiguousarray(ini_crop).ravel())
-            self.kernels = common.do_inference(self.engine_target_context, bindings=self.target_bindings, inputs=self.target_inputs, outputs=self.target_outputs, stream=self.target_stream)
+            np.copyto(self.target_host_inputs[0], ini_crop.ravel())
+            for i in range(args.warmUp):
+                self.warmup_output = common.do_inference(self.engine_target_context, self.target_bindings, self.target_host_inputs, self.target_cuda_inputs, self.target_host_outputs, self.target_cuda_outputs, self.target_stream)
         elif name == 'search':
-            np.copyto(self.search_inputs[0].host, np.ascontiguousarray(ini_crop).ravel())
-            self.searchf = common.do_inference(self.engine_search_context, bindings=self.search_bindings, inputs=self.search_inputs, outputs=self.search_outputs, stream=self.search_stream)
+            np.copyto(self.search_host_inputs[0], ini_crop.ravel())
+            for i in range(args.warmUp):
+                self.searchf = common.do_inference(self.engine_search_context, self.search_bindings, self.search_host_inputs, self.search_cuda_inputs, self.search_host_outputs, self.search_cuda_outputs, self.search_stream)
         elif name == 'xcorr':
-            np.copyto(self.xcorr_inputs[0].host, np.ascontiguousarray(ini_crop).ravel())
-            self.xcorr = common.do_inference(self.engine_xcorr_context, bindings=self.xcorr_bindings, inputs=self.xcorr_inputs, outputs=self.xcorr_outputs, stream=self.xcorr_stream)
-
-        # Remove any context from the top of the context stack, deactivating it.
-        self.ctx.pop()
+            for i in range(len(self.xcorr_host_inputs)):
+                np.copyto(self.xcorr_host_inputs[i], ini_crop[i%len(ini_crop)].ravel())
+                for i in range(args.warmUp):
+                    self.xcorr = common.do_inference(self.engine_xcorr_context, self.xcorr_bindings, self.xcorr_host_inputs, self.xcorr_cuda_inputs, self.xcorr_host_outputs, self.xcorr_cuda_outputs, self.xcorr_stream)
     
     def template(self, z_crop):
-        # Make self the active context, pushing it on top of the context stack.
-        self.ctx.push()
-        # np.copyto(self.target_inputs[0].host, np.ascontiguousarray(to_numpy(z_crop)).ravel())
-        np.copyto(self.target_inputs[0].host, z_crop)
+        np.copyto(self.target_host_inputs[0], z_crop.ravel())
 
         tic = cv2.getTickCount()
-        self.kernels = common.do_inference(self.engine_target_context, bindings=self.target_bindings, inputs=self.target_inputs, outputs=self.target_outputs, stream=self.target_stream)
+        self.kernels = common.do_inference(self.engine_target_context, self.target_bindings, self.target_host_inputs, self.target_cuda_inputs, self.target_host_outputs, self.target_cuda_outputs, self.target_stream)
         t_infer_kernels = (cv2.getTickCount() - tic)/cv2.getTickFrequency()
         logging.debug("Time for inference of template (creating kernels) (s): " + str(t_infer_kernels))
 
@@ -340,12 +342,17 @@ class TrtModel:
         # kernels[4] <-> cls4
         # kernels[5] <-> loc4
 
-        # Remove any context from the top of the context stack, deactivating it.
-        self.ctx.pop()
-        output_shape = (1, 256, 5, 5)
-        xcorr_kernel_shape = (256, 1, 5, 5)
-        self.kernels = [output.reshape(xcorr_kernel_shape) for output in self.kernels]
+        for i in range(len(self.kernels)):
+            self.kernels[i] = self.kernels[i].reshape(self.engine_target.get_binding_shape(i+1))
 
+        if debug:
+            np.save("z_cls2.npy", self.kernels[0])
+            np.save("z_loc2.npy", self.kernels[1])
+            np.save("z_cls3.npy", self.kernels[2])
+            np.save("z_loc3.npy", self.kernels[3])
+            np.save("z_cls4.npy", self.kernels[4])
+            np.save("z_loc4.npy", self.kernels[5])
+        
         # refit engine_xcorr weights with kernels
         logging.debug("Refitting xcorr-engine ...")
         refitter = trt.Refitter(self.engine_xcorr, TRT_LOGGER)
@@ -370,15 +377,19 @@ class TrtModel:
         logging.debug("Refitting xcorr-engine done.")
     
     def track(self, x_crop):
-        # Make self the active context, pushing it on top of the context stack.
-        self.ctx.push()
-        # np.copyto(self.search_inputs[0].host, np.ascontiguousarray(to_numpy(x_crop)).ravel())
-        np.copyto(self.search_inputs[0].host, x_crop)
+        tic = cv2.getTickCount()
+        logging.debug("shape of x_crop: " + str(x_crop.shape))
+        np.copyto(self.search_host_inputs[0], x_crop.ravel())
+        t_copyinput = (cv2.getTickCount() - tic)/cv2.getTickFrequency()
+        logging.debug("Time for loading input (s): " + str(t_copyinput))
 
         tic = cv2.getTickCount()
-        self.searchf = common.do_inference(self.engine_search_context, bindings=self.search_bindings, inputs=self.search_inputs, outputs=self.search_outputs, stream=self.search_stream)
+        self.searchf = common.do_inference(self.engine_search_context, self.search_bindings, self.search_host_inputs, self.search_cuda_inputs, self.search_host_outputs, self.search_cuda_outputs, self.search_stream)
         t_infer_searchf = (cv2.getTickCount() - tic)/cv2.getTickFrequency()
         logging.debug("Time for inference of search features (s): " + str(t_infer_searchf))
+
+        for i in range(len(self.searchf)):
+            self.searchf[i] = self.searchf[i].reshape(self.engine_search.get_binding_shape(i+1))
 
         # somehow:
         # searchf[0] <-> cls2
@@ -388,38 +399,81 @@ class TrtModel:
         # searchf[4] <-> cls4
         # searchf[5] <-> loc4
 
-        # Remove any context from the top of the context stack, deactivating it.
-        self.ctx.pop()
-        output_shape = (1, 256, 29, 29)
-        # self.searchf = [output.reshape(output_shape) for output in self.searchf]
+        if debug:
+            output_shape = (1, 256, 29, 29)
+            xcorr_search_shape = [(1, int(cfg.RPN.KWARGS.in_channels[0]), 29, 29), (1, int(cfg.RPN.KWARGS.in_channels[1]), 29, 29), (1, int(cfg.RPN.KWARGS.in_channels[2]), 29, 29)]
+            xcorr_search_indexes = [0, 0, 1, 1, 2, 2]
+            searchf = []
+            for i in range(len(self.searchf)):
+                searchf.append(self.searchf[i].reshape(xcorr_search_shape[xcorr_search_indexes[i]]))
+            # searchf = [output.reshape(output_shape) for output in self.searchf]
+            np.save("x_cls2.npy", searchf[0])
+            np.save("x_loc2.npy", searchf[1])
+            np.save("x_cls3.npy", searchf[2])
+            np.save("x_loc3.npy", searchf[3])
+            np.save("x_cls4.npy", searchf[4])
+            np.save("x_loc4.npy", searchf[5])
 
-        # Make self the active context, pushing it on top of the context stack.
-        self.ctx.push()
-        # print(np.stack(self.searchf, axis=0).flatten().shape)
-        np.copyto(self.xcorr_inputs[0].host, np.stack(self.searchf, axis=0).flatten())
+        # xcorr sequence is:
+        # cls2, cls3, cls4, loc2, loc3, loc4
 
         tic = cv2.getTickCount()
-        self.xcorr = common.do_inference(self.engine_xcorr_context, bindings=self.xcorr_bindings, inputs=self.xcorr_inputs, outputs=self.xcorr_outputs, stream=self.xcorr_stream)
+        # flatten vs ravel vs reshape(-1)??
+        # https://stackoverflow.com/questions/28930465/what-is-the-difference-between-flatten-and-ravel-functions-in-numpy
+        np.copyto(self.xcorr_host_inputs[0], self.searchf[0].ravel())
+        np.copyto(self.xcorr_host_inputs[1], self.searchf[2].ravel())
+        np.copyto(self.xcorr_host_inputs[2], self.searchf[4].ravel())
+        np.copyto(self.xcorr_host_inputs[3], self.searchf[1].ravel())
+        np.copyto(self.xcorr_host_inputs[4], self.searchf[3].ravel())
+        np.copyto(self.xcorr_host_inputs[5], self.searchf[5].ravel())
+        t_copysearchf = (cv2.getTickCount() - tic)/cv2.getTickFrequency()
+        logging.debug("Time for copying searchf (s): " + str(t_copysearchf))
+
+        tic = cv2.getTickCount()
+        self.xcorr = common.do_inference(self.engine_xcorr_context, self.xcorr_bindings, self.xcorr_host_inputs, self.xcorr_cuda_inputs, self.xcorr_host_outputs, self.xcorr_cuda_outputs, self.xcorr_stream)
         t_infer_xcorr = (cv2.getTickCount() - tic)/(cv2.getTickFrequency())
         logging.debug("Time for inference of xcorr (s): " + str(t_infer_xcorr))
 
-        # Remove any context from the top of the context stack, deactivating it.
-        self.ctx.pop()
+        if debug:
+            np.save("xcorr_cls2.npy", self.xcorr[0])
+            np.save("xcorr_cls3.npy", self.xcorr[1])
+            np.save("xcorr_cls4.npy", self.xcorr[2])
+            np.save("xcorr_loc2.npy", self.xcorr[3])
+            np.save("xcorr_loc3.npy", self.xcorr[4])
+            np.save("xcorr_loc4.npy", self.xcorr[5])
 
-        self.xcorr[0] = self.xcorr[0] * 0.381
-        self.xcorr[1] = self.xcorr[1] * 0.436
-        self.xcorr[2] = self.xcorr[2] * 0.183
-        self.xcorr[3] = self.xcorr[3] * 0.176
-        self.xcorr[4] = self.xcorr[4] * 0.165
-        self.xcorr[5] = self.xcorr[5] * 0.659
+        tic = cv2.getTickCount()
+        # weights:
+        # cls2: 0.3816
+        # cls3: 0.4365
+        # cls4: 0.1820
+        # loc2: 0.1764
+        # loc3: 0.1656
+        # loc4: 0.6579
+
+        # self.xcorr[0] = self.xcorr[0] * 0.381
+        # self.xcorr[1] = self.xcorr[1] * 0.436
+        # self.xcorr[2] = self.xcorr[2] * 0.183
+        # self.xcorr[3] = self.xcorr[3] * 0.176
+        # self.xcorr[4] = self.xcorr[4] * 0.165
+        # self.xcorr[5] = self.xcorr[5] * 0.659
+
+        for i in range(len(self.xcorr)):
+            self.xcorr[i] = self.xcorr[i].reshape(self.engine_xcorr.get_binding_shape(i+6))
+
+        # LT
+        self.xcorr[0] = self.xcorr[0] * 0.3492
+        self.xcorr[1] = self.xcorr[1] * 1.4502
+        self.xcorr[2] = self.xcorr[2] * 0.8729
+        self.xcorr[3] = self.xcorr[3] * 0.7019
+        self.xcorr[4] = self.xcorr[4] * 0.6217
+        self.xcorr[5] = self.xcorr[5] * 1.3487
 
         self.cls = self.xcorr[0] + self.xcorr[1] + self.xcorr[2]
         self.loc = self.xcorr[3] + self.xcorr[4] + self.xcorr[5]
 
-        cls_shape = (1, 10, 25, 25)
-        loc_shape = (1, 20, 25, 25)
-        self.cls = self.cls.reshape(cls_shape)
-        self.loc = self.loc.reshape(loc_shape)
+        t_multiplyreshape = (cv2.getTickCount() - tic)/(cv2.getTickFrequency())
+        logging.debug("Time for multiplying and reshaping (s): " + str(t_multiplyreshape))
 
 
 class SiamRPNTracker:
@@ -566,10 +620,9 @@ class SiamRPNTracker:
         # get crop
         tic = cv2.getTickCount()
         z_crop = self.get_subwindow(img, self.center_pos,
-                                    cfg.TRACK.EXEMPLAR_SIZE,
+                                    cfg.TRACK.EXEMPLAR_SIZE, 
                                     s_z, self.channel_average)
         t_get_zcrop = (cv2.getTickCount() - tic)/cv2.getTickFrequency()
-        logging.debug("Time for get z_crop: " + str(t_get_zcrop))
         
         # run inference of template image (z_crop)
         # self.model.template(z_crop)
@@ -582,6 +635,8 @@ class SiamRPNTracker:
         return:
             bbox(list):[x, y, width, height]
         """
+        logging.debug("went into normal tracking")
+        tic = cv2.getTickCount()
         w_z = self.size[0] + cfg.TRACK.CONTEXT_AMOUNT * np.sum(self.size)
         h_z = self.size[1] + cfg.TRACK.CONTEXT_AMOUNT * np.sum(self.size)
         s_z = np.sqrt(w_z * h_z)
@@ -590,14 +645,20 @@ class SiamRPNTracker:
         x_crop = self.get_subwindow(img, self.center_pos,
                                     cfg.TRACK.INSTANCE_SIZE,
                                     round(s_x), self.channel_average)
-        
+        t_getwindow = (cv2.getTickCount() - tic)/cv2.getTickFrequency()
+        logging.debug("Time for get subwindow (s): " + str(t_getwindow))
         # outputs = self.model.track(x_crop)
         self.trtmodel.track(x_crop)
+        t_afterinf = (cv2.getTickCount() - tic)/cv2.getTickFrequency()
+        logging.debug("Time after trt inference (s): " + str(t_afterinf))
 
         # self.xcorr[0] = cls
         # self.xcorr[1] = loc
         score = self._convert_score(self.trtmodel.cls)
         pred_bbox = self._convert_bbox(self.trtmodel.loc, self.anchors)
+
+        t_afterconv = (cv2.getTickCount() - tic)/cv2.getTickFrequency()
+        logging.debug("Time after score and box conversion (s): " + str(t_afterconv))
 
         def change(r):
             return np.maximum(r, 1. / r)
@@ -644,6 +705,8 @@ class SiamRPNTracker:
                 width,
                 height]
         best_score = score[best_idx]
+        t_track = (cv2.getTickCount() - tic)/cv2.getTickFrequency()
+        logging.debug("Time for tracker.track() (s): " + str(t_track))
         return {
                 'bbox': bbox,
                 'best_score': best_score
@@ -661,6 +724,7 @@ class SiamRPNLTTracker(SiamRPNTracker):
         return:
             bbox(list):[x, y, width, height]
         """
+        logging.debug("went into lt tracking ...")
         w_z = self.size[0] + cfg.TRACK.CONTEXT_AMOUNT * np.sum(self.size)
         h_z = self.size[1] + cfg.TRACK.CONTEXT_AMOUNT * np.sum(self.size)
         s_z = np.sqrt(w_z * h_z)
@@ -688,7 +752,7 @@ class SiamRPNLTTracker(SiamRPNTracker):
         # self.xcorr[0] = cls
         # self.xcorr[1] = loc
         score = self._convert_score(self.trtmodel.cls)
-        pred_bbox = self._convert_bbox(self.trtmodel.loc, self.anchors)
+        pred_bbox = self._convert_bbox(self.trtmodel.loc, anchors)
 
         # outputs = self.model.track(x_crop)
         # score = self._convert_score(outputs['cls'])
@@ -749,7 +813,7 @@ class SiamRPNLTTracker(SiamRPNTracker):
             self.longterm_state = True
         elif best_score > cfg.TRACK.CONFIDENCE_HIGH:
             self.longterm_state = False
-
+        logging.debug("longterm_state = " + str(self.longterm_state))
         return {
                 'bbox': bbox,
                 'best_score': best_score
@@ -758,6 +822,24 @@ class SiamRPNLTTracker(SiamRPNTracker):
 
 def main():
     logging.info("START OF SCRIPT")
+    logging.info("Printing version info:")
+    versions = {}
+    for module in sys.modules:
+        try:
+            versions[module] = sys.modules[module].__version__
+        except:
+            try:
+                if type(sys.modules[module].version) is str:
+                    versions[module] = sys.modules[module].version
+                else:
+                    versions[module] = sys.modules[module].version()
+            except:
+                try:
+                    versions[module] = sys.modules[module].VERSION
+                except:
+                    pass
+    logging.info(versions)
+    logging.info("Given arguments: " + str(args))
     cur_dir = os.path.dirname(os.path.realpath(__file__))
     dataset_root = os.path.join(cur_dir, '../testing_dataset', args.dataset)
 
@@ -781,7 +863,10 @@ def main():
     t_load_engines = (cv2.getTickCount() - tic)/cv2.getTickFrequency()
     logging.debug("Time for loading/creating trt engines (s): " + str(t_load_engines))
 
-    tracker = SiamRPNTracker(trtmodel)
+    if 'SiamRPNTracker' in cfg.TRACK.TYPE:
+        tracker = SiamRPNTracker(trtmodel)
+    elif 'SiamRPNLTTracker' in cfg.TRACK.TYPE:
+        tracker = SiamRPNLTTracker(trtmodel)
 
     report_lines = []
     speed = []
@@ -798,6 +883,8 @@ def main():
             pred_bboxes = []
             overlaps = []
             for idx, (img, gt_bbox) in enumerate(video):
+                logging.debug("")
+                logging.debug("@ img "+ str(idx))
                 if len(gt_bbox) == 4:
                     gt_bbox = [gt_bbox[0], gt_bbox[1],
                        gt_bbox[0], gt_bbox[1]+gt_bbox[3]-1,
@@ -854,7 +941,7 @@ def main():
                     v_idx+1, video.name, toc, idx / toc, lost_number)
             # print('({:3d}) Video: {:12s} Time: {:2.4f}s Speed: {:3.1f}fps Lost: {:d}'.format(
             #         v_idx+1, video.name, toc, idx / toc, lost_number))
-            print(report_text)
+            logging.info(report_text)
             report_lines.append(report_text)
             speed.append(idx / toc)
         
@@ -877,6 +964,7 @@ def main():
             scores = []
             track_times = []
             for idx, (img, gt_bbox) in enumerate(video):
+                logging.debug("at img nr " + str(idx))
                 tic = cv2.getTickCount()
                 if idx == 0:
                     cx, cy, w, h = get_axis_aligned_bbox(np.array(gt_bbox))
@@ -884,7 +972,7 @@ def main():
                     tracker.init(img, gt_bbox_)
                     pred_bbox = gt_bbox_
                     scores.append(None)
-                    if 'VOT2019-LT' == args.dataset:
+                    if 'VOT2018-LT' == args.dataset:
                         pred_bboxes.append([1])
                     else:
                         pred_bboxes.append(pred_bbox)
@@ -923,24 +1011,38 @@ def main():
             
             report_text = '({:3d}) Video: {:12s} Time: {:5.1f}s Speed: {:3.1f}fps'.format(
                 v_idx+1, video.name, toc, idx / toc)
-            print(report_text)
+            logging.info(report_text)
             report_lines.append(report_text)
+            speed.append(idx / toc)
         
+        average_speed = sum(speed) / len(speed)
         report_path = os.path.join('results', args.dataset, 'trt_model', 'longterm', 'inference_report.txt')
         with open(report_path, 'w') as f:
             for line in report_lines:
                 f.write(line + '\n')
+            f.write("\n\nAverage Speed: {:3.1f}fps".format(average_speed))
 
-    logging.info("FPS: " + str(175/toc))
-    trtmodel.cuda_cleanup()
+    logging.shutdown()
     
     now = datetime.now()
     now = now.strftime("%d_%m_%Y_%H_%M")
-    os.rename(os.path.join('results', args.dataset, 'trt_model'), os.path.join('results', args.dataset, 'trt_model_'+ str(args.precision) + "_" + now))
+    os.rename(os.path.join('results', args.dataset, 'trt_model'), os.path.join('results', args.dataset, 'trt_model_'+ "_" + now))
 
-    print("\nDone.")
+    # print("\nDone.")
 
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
+    if args.log.upper() not in valid_log_levels:
+        logging.error("Given log level '" + str(args.log) + "' is not valid. Exiting.")
+        sys.exit(-1)
+    import shutil
+    if os.path.isdir(os.path.join('results', args.dataset, 'trt_model')):
+        shutil.rmtree(os.path.join('results', args.dataset, 'trt_model'))
+    os.makedirs(os.path.join('results', args.dataset, 'trt_model'))
+    logging_path = os.path.join('results', args.dataset, 'trt_model', 'log.txt')
+    logging_level = getattr(logging, args.log.upper())
+    log_handlers = [logging.StreamHandler()]
+    if args.logtofile:
+        log_handlers.append(logging.FileHandler(logging_path))
+    logging.basicConfig(level=logging_level, format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s', datefmt='%H:%M:%S', handlers=log_handlers)
     main()
