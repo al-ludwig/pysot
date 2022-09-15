@@ -49,7 +49,6 @@ required.add_argument('--dataset', required=True, help="Name of the testing data
 optional.add_argument('--video', default='', help="test one special video")
 required.add_argument('--config', default='', type=file_path, help='path to the config file')
 optional.add_argument('--calibration_path', default='', help='Set the path to the calibration images')
-optional.add_argument('--logtofile', action='store_true', default=False, help='save log to file (Bool)')
 optional.add_argument('--warmUp', default=5, type=int, help='Specify the number of warm-up runs per engine (default=5)')
 optional.add_argument('--log', default='info', help='Set the logging level (' + str(valid_log_levels) + ')')
 args = parser.parse_args()
@@ -820,7 +819,7 @@ class SiamRPNLTTracker(SiamRPNTracker):
                }
 
 
-def main():
+def main(results_path):
     logging.info("START OF SCRIPT")
     logging.info("Printing version info:")
     versions = {}
@@ -871,6 +870,15 @@ def main():
     report_lines = []
     speed = []
 
+    import subprocess
+    try:
+        tegrastats_loggingpath = os.path.join(results_path, 'tegrastats.log')
+        subprocess.Popen(["/usr/bin/tegrastats", "--interval", "100", "--logfile", os.path.abspath(tegrastats_loggingpath), "--start"])
+        logging.info("Started tegrastats logging @ {}".format(tegrastats_loggingpath))
+    except Exception as e:
+        logging.info("Tegrastats is not available on this setup, so no log about device utilization will be made.")
+        logging.info(e)
+
     if args.dataset in ['VOT2016', 'VOT2018', 'VOT2019']:
         for v_idx, video in enumerate(dataset):
             if args.video != '':
@@ -920,8 +928,7 @@ def main():
             toc /= cv2.getTickFrequency()
 
             # save results
-            video_path = os.path.join('results', args.dataset, 'trt_model',
-                    'baseline', video.name)
+            video_path = os.path.join(results_path, video.name)
             if not os.path.isdir(video_path):
                 os.makedirs(video_path)
             result_path = os.path.join(video_path, '{}_000.txt'.format(video.name))
@@ -944,14 +951,6 @@ def main():
             logging.info(report_text)
             report_lines.append(report_text)
             speed.append(idx / toc)
-        
-        average_speed = sum(speed) / len(speed)
-        report_path = os.path.join('results', args.dataset, 'trt_model', 'baseline', 'inference_report.txt')
-        with open(report_path, 'w') as f:
-            for line in report_lines:
-                f.write(line + '\n')
-            f.write("\n\nAverage Speed: {:3.1f}fps".format(average_speed))
-
     else:
         # OPE tracking (OPE ... one pass evaluation -> no re-init)
         for v_idx, video in enumerate(dataset):
@@ -989,8 +988,7 @@ def main():
 
             # save results
             if 'VOT2019-LT' == args.dataset:
-                video_path = os.path.join('results', args.dataset, 'trt_model',
-                        'longterm', video.name)
+                video_path = os.path.join(results_path, video.name)
                 if not os.path.isdir(video_path):
                     os.makedirs(video_path)
                 result_path = os.path.join(video_path,
@@ -1014,21 +1012,23 @@ def main():
             logging.info(report_text)
             report_lines.append(report_text)
             speed.append(idx / toc)
-        
-        average_speed = sum(speed) / len(speed)
-        report_path = os.path.join('results', args.dataset, 'trt_model', 'longterm', 'inference_report.txt')
-        with open(report_path, 'w') as f:
-            for line in report_lines:
-                f.write(line + '\n')
-            f.write("\n\nAverage Speed: {:3.1f}fps".format(average_speed))
 
+    try:
+        subprocess.Popen(["tegrastats", "--stop"])
+        logging.info("Stopped tegrastats logging")
+    except Exception as e:
+        logging.info("Could not stop tegratstas logging.")
+        logging.info(e)
+
+    average_speed = sum(speed) / len(speed)
+    report_path = os.path.join(results_path, 'inference_report.txt')
+    with open(report_path, 'w') as f:
+        for line in report_lines:
+            f.write(line + '\n')
+        f.write("\n\nAverage Speed: {:3.1f}fps".format(average_speed))
+
+    logging.info("End of script.")
     logging.shutdown()
-    
-    now = datetime.now()
-    now = now.strftime("%d_%m_%Y_%H_%M")
-    os.rename(os.path.join('results', args.dataset, 'trt_model'), os.path.join('results', args.dataset, 'trt_model_'+ "_" + now))
-
-    # print("\nDone.")
 
 
 if __name__ == '__main__':
@@ -1036,13 +1036,16 @@ if __name__ == '__main__':
         logging.error("Given log level '" + str(args.log) + "' is not valid. Exiting.")
         sys.exit(-1)
     import shutil
-    if os.path.isdir(os.path.join('results', args.dataset, 'trt_model')):
-        shutil.rmtree(os.path.join('results', args.dataset, 'trt_model'))
-    os.makedirs(os.path.join('results', args.dataset, 'trt_model'))
-    logging_path = os.path.join('results', args.dataset, 'trt_model', 'log.txt')
+     # create results directory
+    now = datetime.now()
+    now = now.strftime("%d_%m_%Y_%H_%M")
+    model_name = "trt_model_" + now    
+    results_path = os.path.join('results', args.dataset, model_name)
+    if os.path.isdir(results_path):
+        shutil.rmtree(results_path)    
+    os.makedirs(results_path)
+    logging_path = os.path.join(results_path, 'log.txt')
     logging_level = getattr(logging, args.log.upper())
-    log_handlers = [logging.StreamHandler()]
-    if args.logtofile:
-        log_handlers.append(logging.FileHandler(logging_path))
+    log_handlers = [logging.StreamHandler(), logging.FileHandler(logging_path)]
     logging.basicConfig(level=logging_level, format='%(asctime)s,%(msecs)d %(name)s %(levelname)s %(message)s', datefmt='%H:%M:%S', handlers=log_handlers)
-    main()
+    main(results_path)
