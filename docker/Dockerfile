@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y python3-pip
 RUN pip3 install --upgrade pip && pip3 install --upgrade appdirs==1.4.4 colorama==0.4.4 Cython==0.29.27 \
 dataclasses==0.6 decorator==5.1.1 Mako==1.1.6 MarkupSafe==2.0.1 numpy==1.19.4 onnx==1.11.0 Pillow==8.4.0 \
 protobuf==3.19.4 pytools==2021.2.9 torchvision==0.10.0 PyYAML==6.0 setuptools==59.6.0 tqdm==4.62.2 \
-typing_extensions==4.0.1 yacs==0.1.8 opencv-python
+typing_extensions==4.0.1 yacs==0.1.8 opencv-python onnx
 RUN apt-get install build-essential && apt-get install python3-dev && apt-get install -y libopenblas-dev \
 && pip3 install pycuda==2020.1 && DEBIAN_FRONTEND="noninteractive" apt-get install --yes python-opencv
 # RUN apt-get update && DEBIAN_FRONTEND="noninteractive" apt-get install -y python3-opencv 
