@@ -8,6 +8,7 @@ from __future__ import unicode_literals
 import logging
 
 import torch
+import torch.nn as nn
 
 
 logger = logging.getLogger('global')
@@ -33,7 +34,7 @@ def check_keys(model, pretrained_state_dict):
     logger.info('used keys:{}'.format(len(used_pretrained_keys)))
     assert len(used_pretrained_keys) > 0, \
         'load NONE from pretrained checkpoint'
-    return True
+    return missing_keys
 
 
 def remove_prefix(state_dict, prefix):
@@ -56,7 +57,7 @@ def load_pretrain(model, pretrained_path):
         pretrained_dict = remove_prefix(pretrained_dict, 'module.')
 
     try:
-        check_keys(model, pretrained_dict)
+        missing_keys = check_keys(model, pretrained_dict)
     except:
         logger.info('[Warning]: using pretrain as features.\
                 Adding "features." as prefix')
@@ -66,7 +67,44 @@ def load_pretrain(model, pretrained_path):
             new_dict[k] = v
         pretrained_dict = new_dict
         check_keys(model, pretrained_dict)
-    model.load_state_dict(pretrained_dict, strict=False)
+    try:
+        model.load_state_dict(pretrained_dict, strict=False)
+    except RuntimeError:
+        # most possibly loading a pruned model
+        for key, module in model.named_modules():
+            # if key is in unused_pretrained_keys, then skip (otherwise key error)
+            weight = key + '.weight'
+            bias = key + '.bias'
+            if (weight or bias) in missing_keys:
+                logger.info("Skip adapting module {}".format(key))
+                continue
+            # torch.nn.BatchNorm2d
+            if isinstance(module, nn.BatchNorm2d):
+                module.weight = torch.nn.Parameter(pretrained_dict[key + ".weight"])
+                module.bias = torch.nn.Parameter(pretrained_dict[key + ".bias"])
+                module.num_features = module.weight.size(0)
+                module.running_mean = module.running_mean[0 : module.num_features]
+                module.running_var = module.running_var[0 : module.num_features]
+            # torch.nn.Conv2d
+            elif isinstance(module, nn.Conv2d):
+                # for conv2d layer, bias and groups should be consider
+                module.weight = torch.nn.Parameter(pretrained_dict[key + ".weight"])
+                module.out_channels = module.weight.size(0)
+                module.in_channels = module.weight.size(1)
+                if module.groups is not 1:
+                    # group convolution case
+                    # only support for MobileNet, pointwise conv
+                    module.in_channels = module.weight.size(0)
+                    module.groups = module.in_channels
+                if key + ".bias" in pretrained_dict:
+                    module.bias = torch.nn.Parameter(pretrained_dict[key + ".bias"])
+            # torch.nn.Linear
+            elif isinstance(module, nn.Linear):
+                module.weight = torch.nn.Parameter(pretrained_dict[key + ".weight"])
+                if key + ".bias" in pretrained_dict:
+                    module.bias = torch.nn.Parameter(pretrained_dict[key + ".bias"])
+                module.out_features = module.weight.size(0)
+                module.in_features = module.weight.size(1)
     return model
 
 
