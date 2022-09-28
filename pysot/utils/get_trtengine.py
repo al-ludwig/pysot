@@ -2,6 +2,9 @@ import logging
 import tensorrt as trt
 import os
 import sys
+import onnx
+
+from google.protobuf.json_format import MessageToDict
 
 from pysot.utils.Int8Calibrator import Int8Calibrator, get_calibration_files
 
@@ -20,7 +23,7 @@ def get_precision_builderflag(arg):
 def GiB(val):
     return val * 1 << 30
 
-def get_engine(TRT_LOGGER, runtime, model_file, precision, calibration_path: None, refittable: bool = False):
+def get_engine(net_type, TRT_LOGGER, runtime, model_file, precision, calibration_path: None, refittable: bool = False):
     """Attempts to load a serialized engine if available, otherwise builds a new TensorRT engine and saves it."""
     def build_engine():
         builder = trt.Builder(TRT_LOGGER)
@@ -33,9 +36,25 @@ def get_engine(TRT_LOGGER, runtime, model_file, precision, calibration_path: Non
         if precision_builderflag == trt.BuilderFlag.INT8:
             if not calibration_path:
                 raise Exception("No calibration path given!.")
+
+            # config.int8_calibrator = Int8Calibrator(input_shapes, calibration_files, NUM_IMAGES_PER_BATCH)
+            # load onnx model to get the input shapes
+            model = onnx.load(model_file)
+            input_shapes = []
+            for _input in model.graph.input:
+                model_input = MessageToDict(_input)
+                dims = []
+                for dim in model_input['type']['tensorType']['shape']['dim'][1:]:
+                    dims.append(int(dim['dimValue']))
+                input_shapes.append(tuple(dims))
+            del model
+
+            # always use batch size = 1
             NUM_IMAGES_PER_BATCH = 1
-            calibration_files = get_calibration_files(calibration_path)
-            config.int8_calibrator = Int8Calibrator(calibration_files, NUM_IMAGES_PER_BATCH)
+            cur_path = os.path.dirname(os.path.realpath(__file__))
+            calibration_files = get_calibration_files(os.path.join(cur_path, '../../', calibration_path))
+            calibration_cache = net_type + "_int8calibration.cache"
+            config.int8_calibrator = Int8Calibrator(input_shapes, calibration_files, NUM_IMAGES_PER_BATCH, cache_file=calibration_cache)
             
         config.set_flag(precision_builderflag)
         if(refittable):
@@ -69,6 +88,9 @@ def get_engine(TRT_LOGGER, runtime, model_file, precision, calibration_path: Non
         except Exception as e:
             logging.error("Something wrent wrong while creating the "+ str(model_file).rsplit('.', 1)[0] + ".engine")
             logging.error("Details: " + str(e))
+            exc_type, exc_obj, exc_tb = sys.exc_info()
+            fname = os.path.split(exc_tb.tb_frame.f_code.co_filename)[1]
+            logging.error(exc_type, fname, exc_tb.tb_lineno)
     elif model_file.endswith('.engine'):
         # try to load the engine
         logging.info("Reading engine from file {}:".format(model_file))

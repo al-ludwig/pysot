@@ -50,7 +50,6 @@ optional.add_argument('--xcorr_pr', default='fp32', choices=['fp32', 'fp16', 'in
 required.add_argument('--dataset', required=True, help="Name of the testing dataset")
 optional.add_argument('--video', default='', help="test one special video")
 required.add_argument('--config', default='', type=file_path, help='path to the config file')
-optional.add_argument('--calibration_path', default='', help='Set the path to the calibration images')
 optional.add_argument('--warmUp', default=5, type=int, help='Specify the number of warm-up runs per engine (default=5)')
 optional.add_argument('--log', default='info', help='Set the logging level (' + str(valid_log_levels) + ')')
 args = parser.parse_args()
@@ -93,7 +92,7 @@ def main(results_path):
     TRT_LOGGER = trt.Logger(trt.Logger.INFO)
     runtime = trt.Runtime(TRT_LOGGER)
     try:
-        trtmodel = TrtModel(TRT_LOGGER, runtime, args.target_net, args.target_net_pr, args.search_net, args.search_net_pr, args.xcorr, args.xcorr_pr, args.warmUp, calibration_path="")
+        trtmodel = TrtModel(TRT_LOGGER, runtime, args.target_net, args.target_net_pr, args.search_net, args.search_net_pr, args.xcorr, args.xcorr_pr, args.warmUp)
     except Exception as e:
         logging.error(e)
         return

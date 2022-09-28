@@ -48,15 +48,20 @@ class Int8Calibrator(trt.IInt8EntropyCalibrator2):
         shape `input_shape`.
     """
 
-    def __init__(self, calibration_files=[], batch_size=32, input_shape=(1, 3, 127, 127),
+    def __init__(self, input_shapes, calibration_files=[], batch_size=32,
                  cache_file="calibration.cache", preprocess_func=None):
         # super().__init__()
         trt.IInt8EntropyCalibrator2.__init__(self)
-        self.input_shape = input_shape
+        # self.input_shape = input_shape
+        self.input_shapes = input_shapes
         self.cache_file = cache_file
         self.batch_size = batch_size
-        self.batch = np.zeros((self.batch_size, *self.input_shape), dtype=np.float32)
-        self.device_input = cuda.mem_alloc(self.batch.nbytes)
+        self.batch = []
+        self.device_inputs = []
+        for input_shape in self.input_shapes:
+            batch = np.ascontiguousarray(np.zeros((self.batch_size, *input_shape), dtype=np.float32))
+            self.batch.append(batch)
+            self.device_inputs.append(cuda.mem_alloc(batch.nbytes))
 
         self.files = calibration_files
         # Pad the list so it is a multiple of batch_size
@@ -73,20 +78,22 @@ class Int8Calibrator(trt.IInt8EntropyCalibrator2):
 
     def load_batches(self):
         # Populates a persistent self.batch buffer with images.
-        for index in range(0, len(self.files), self.batch_size):
-            for offset in range(self.batch_size):
+        # for index in range(0, len(self.files), self.batch_size):
+        for index in range(0, len(self.files), len(self.input_shapes)):
+            # for offset in range(self.batch_size):
+            for offset in range(len(self.input_shapes)):
                 ext = os.path.splitext(self.files[index + offset])[-1].lower()
                 if ext == '.jpg' or ext == '.jpeg':
                     image = Image.open(self.files[index + offset])
                     image = np.array(image)
+                    image = image.transpose(2, 0, 1)
+                    image = image[np.newaxis, :, :, :]
                 elif ext == '.npy':
                     image = np.load(self.files[index + offset])
                 else:
                     logging.error("File type of calibration images is not supported! Given filetype: " + str(ext))
                     return None
                 
-                image = image.transpose(2, 0, 1)
-                image = image[np.newaxis, :, :, :]
                 image = image.astype(np.float32)
                 self.batch[offset] = image
                 # self.batch[offset] = self.preprocess_func(image, *self.input_shape)
@@ -101,8 +108,11 @@ class Int8Calibrator(trt.IInt8EntropyCalibrator2):
             # Assume self.batches is a generator that provides batch data.
             batch = next(self.batches)
             # Assume that self.device_input is a device buffer allocated by the constructor.
-            cuda.memcpy_htod(self.device_input, batch)
-            return [int(self.device_input)]
+            # cuda.memcpy_htod(self.device_input, batch)
+            for i in range(len(self.device_inputs)):
+                cuda.memcpy_htod(self.device_inputs[i], np.ascontiguousarray(batch[i]))
+            # return [int(self.device_input)]
+            return [int(input) for input in self.device_inputs]
         except StopIteration:
             # When we're out of batches, we return either [] or None.
             # This signals to TensorRT that there is no calibration data remaining.

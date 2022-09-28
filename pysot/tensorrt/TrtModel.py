@@ -8,13 +8,13 @@ from pysot.utils.trt_utils import allocate_buffers, do_inference
 from pysot.core.config import cfg
 
 class TrtModel:
-    def __init__(self, TRT_LOGGER, runtime, target_net, target_net_pr, search_net, search_net_pr, xcorr, xcorr_pr, warmUp, calibration_path):
+    def __init__(self, TRT_LOGGER, runtime, target_net, target_net_pr, search_net, search_net_pr, xcorr, xcorr_pr, warmUp):
         self.TRT_LOGGER = TRT_LOGGER
         logging.info("Creating tensorrt engines ...")
         try:
-            self.engine_target = get_engine(TRT_LOGGER, runtime, target_net, target_net_pr, calibration_path,refittable=False)
-            self.engine_search = get_engine(TRT_LOGGER, runtime, search_net, search_net_pr, calibration_path, refittable=False)
-            self.engine_xcorr = get_engine(TRT_LOGGER, runtime, xcorr, xcorr_pr, calibration_path, refittable=True)
+            self.engine_target = get_engine('target_net', TRT_LOGGER, runtime, target_net, target_net_pr, cfg.INFERENCE.INT8_CALIBRATION.TARGET_NET, refittable=False)
+            self.engine_search = get_engine('search_net', TRT_LOGGER, runtime, search_net, search_net_pr, cfg.INFERENCE.INT8_CALIBRATION.SEARCH_NET, refittable=False)
+            self.engine_xcorr = get_engine('xcorr', TRT_LOGGER, runtime, xcorr, xcorr_pr, cfg.INFERENCE.INT8_CALIBRATION.XCORR, refittable=True)
         except Exception as e:
             raise Exception("Something went wrong when getting the engines.\nDetails: " + str(e))
         

@@ -288,3 +288,20 @@ __C.TRACK.MASK_THERSHOLD = 0.30
 
 # Mask output size
 __C.TRACK.MASK_OUTPUT_SIZE = 127
+
+# ------------------------------------------------------------------------ #
+# Inference options
+# ------------------------------------------------------------------------ #
+__C.INFERENCE = CN()
+
+# int8 icalibration paths
+__C.INFERENCE.INT8_CALIBRATION = CN()
+
+# path to int8 calibration images for target_net
+__C.INFERENCE.INT8_CALIBRATION.TARGET_NET = 'testing_dataset/VOT2018_int8cal_target'
+
+# path to int8 calibration images for search_net
+__C.INFERENCE.INT8_CALIBRATION.SEARCH_NET = 'testing_dataset/VOT2018_int8cal_search'
+
+# path to int8 calibration images for xcorr
+__C.INFERENCE.INT8_CALIBRATION.XCORR = 'testing_dataset/VOT2018_int8cal_xcorr'
