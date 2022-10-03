@@ -1,7 +1,7 @@
 # from https://github.com/pytorch/examples/blob/main/imagenet/main.py
 
 import argparse
-import os
+import os, sys
 import random
 import shutil
 import time
@@ -9,6 +9,7 @@ import warnings
 from enum import Enum
 import logging
 from datetime import datetime
+import time
 from torch.utils.tensorboard import SummaryWriter
 
 from pysot.models.model_builder import ModelBuilder
@@ -108,21 +109,30 @@ class BackboneBuilder(nn.Module):
     def forward(self, data):
         return self.backbone(data)
 
+args = parser.parse_args()
+if args.log is None:
+    print("ERROR: Give a path to the log dir! Exiting ...")
+    sys.exit(-1)
+
 now = datetime.now()
 now = now.strftime("%d_%m_%Y_%H_%M")
+output_dir = os.path.join(args.log, 'train_backbone_' + now)
+if os.path.exists(output_dir):
+    while os.path.exists(output_dir):
+        time.sleep(60)
+        now = datetime.now()
+        now = now.strftime("%d_%m_%Y_%H_%M")
+        output_dir = os.path.join(args.log, 'train_backbone_' + now)
+
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
 
 def main():
-    args = parser.parse_args()
     options = vars(args)
 
-    if args.log is None:
-        print("ERROR: Give a path to the log dir! Exiting ...")
-        return
-    if not os.path.exists(os.path.join(args.log, 'train_backbone_' + now)):
-        os.makedirs(os.path.join(args.log, 'train_backbone_' + now))
+    
     init_log('global', logging.INFO)
-    add_file_handler('global', os.path.join(os.path.join(args.log, 'train_backbone_' + now), 'log.txt'),
-                             logging.INFO)
+    add_file_handler('global', os.path.join(output_dir, 'log.txt'), logging.INFO)
     logger.info("Start of backbone training.")
     logger.info("Passed arguments:")
     logger.info(options)
@@ -239,7 +249,7 @@ def main_worker(gpu, ngpus_per_node, args):
     """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
     # scheduler = StepLR(optimizer, step_size=30, gamma=0.1)
     # set cosineannealingLR
-    scheduler = CosineAnnealingLR(optimizer, args.epochs, args.lr)
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
     logger.info("Loss function, optimizer and learning rate defined.")
     
     # optionally resume from a checkpoint
@@ -317,6 +327,8 @@ def main_worker(gpu, ngpus_per_node, args):
             train_sampler.set_epoch(epoch)
 
         # train for one epoch
+        logger.info("Current learning rate: " + str(scheduler.get_last_lr()[0]))
+        tb_writer.add_scalar('lr', scheduler.get_last_lr()[0], epoch)
         train(train_loader, model, criterion, optimizer, epoch, args, tb_writer)
 
         # evaluate on validation set
@@ -331,6 +343,8 @@ def main_worker(gpu, ngpus_per_node, args):
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank % ngpus_per_node == 0):
+            if not os.path.exists(os.path.join(output_dir, 'checkpoints')):
+                os.makedirs(os.path.join(output_dir, 'checkpoints'))
             save_checkpoint({
                 'epoch': epoch + 1,
                 'arch': args.arch,
@@ -338,7 +352,7 @@ def main_worker(gpu, ngpus_per_node, args):
                 'best_acc1': best_acc1,
                 'optimizer' : optimizer.state_dict(),
                 'scheduler' : scheduler.state_dict()
-            }, is_best, filename='../checkpoints/' + args.out_name + "_epoch" + str(epoch) + '.pth')
+            }, is_best, filename=os.path.join(output_dir, 'checkpoints', args.out_name + "_epoch" + str(epoch) + '.pth'))
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args, tb_writer):
