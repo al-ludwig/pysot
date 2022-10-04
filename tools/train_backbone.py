@@ -59,6 +59,7 @@ parser.add_argument('-b', '--batch-size', default=256, type=int,
                          'using Data Parallel or Distributed Data Parallel')
 parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
                     metavar='LR', help='initial learning rate', dest='lr')
+parser.add_argument('--lrscheduler', default="step", choices=['step', 'cosineannealing'], help='type of learning rate scheduler')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum')
 parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float,
@@ -246,10 +247,15 @@ def main_worker(gpu, ngpus_per_node, args):
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
     
-    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
-    # scheduler = StepLR(optimizer, step_size=30, gamma=0.1)
-    # set cosineannealingLR
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
+    if args.lrscheduler == "step":
+        # Sets the learning rate to the initial LR decayed by 10 every 30 epochs
+        scheduler = StepLR(optimizer, step_size=30, gamma=0.1)
+    elif args.lrscheduler == "cosineannealing":
+        # set cosineannealingLR
+        scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
+    else:
+        logger.error("Given lr scheduler is not supported")
+        return
     logger.info("Loss function, optimizer and learning rate defined.")
     
     # optionally resume from a checkpoint
