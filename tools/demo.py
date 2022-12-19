@@ -11,6 +11,9 @@ import torch
 import numpy as np
 from glob import glob
 
+import sys
+sys.path.insert(0, "C:\\Workspace\\pysot")
+
 from pysot.core.config import cfg
 from pysot.models.model_builder import ModelBuilder
 from pysot.tracker.tracker_builder import build_tracker
@@ -115,6 +118,7 @@ def main():
                             (bbox[0]+bbox[2], bbox[1]+bbox[3]),
                             (0, 255, 0), 3)
             score = outputs['best_score']
+            log_message = f"@ frame {idx}: confidence = {score}, bbox = {bbox}"
             cv2.putText(frame, "conficence: " + str(score), (40, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
             if cfg.TRACK.TYPE == "SiamRPNLTTracker":
                 if score < cfg.TRACK.CONFIDENCE_LOW:
@@ -122,8 +126,9 @@ def main():
                 elif score > cfg.TRACK.CONFIDENCE_HIGH:
                     longterm_state = False
                 cv2.putText(frame, "longterm state: " + str(longterm_state), (40, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+                log_message = log_message + f", longterm_state = {longterm_state}"
             cv2.imshow(video_name, frame)
-            logger.info(f"@ frame {idx}: confidence = {score}, bbox = {bbox}")
+            logger.info(log_message)
             cv2.waitKey(40)
         idx += 1
 
