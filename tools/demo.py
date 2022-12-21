@@ -68,6 +68,7 @@ def get_frames(video_name):
 def main():
     # load config
     cfg.merge_from_file(args.config)
+    logger.info(f"Given config: {cfg}")
     cfg.CUDA = torch.cuda.is_available() and cfg.CUDA
     longterm_state = False
 
@@ -144,7 +145,7 @@ def main():
                                 (0, 255, 0), 3)
                 score = outputs['best_score']
                 confidence.append(score)
-                log_message += f"@ frame {idx:5d}: \tconfidence = {confidence[idx]:.5f}, bbox = {bbox}"
+                log_message += f"@ frame {idx:5d}: confidence = {confidence[idx]:.5f}, bbox = {bbox}"
                 cv2.putText(frame, f"confidence: {confidence[idx]:.5f}", (40, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
                 if cfg.TRACK.TYPE == "SiamRPNLTTracker":
                     if score < cfg.TRACK.CONFIDENCE_LOW:
@@ -172,8 +173,9 @@ def main():
             idx += 1
     except KeyboardInterrupt:
         logger.info(f"Tracking cancelled by user.")
-        if args.gt:
-            logger.info(f"Stats: mean confidence = {np.mean(confidence):.3f}, mean IoU = {np.mean(iou):.3f}, mean fps = {np.mean(fps):.1f}")
+
+    if args.gt and confidence and iou and fps:
+        logger.info(f"Stats: mean confidence = {np.mean(confidence):.3f}, mean IoU = {np.mean(iou):.3f}, mean fps = {np.mean(fps):.1f}")
 
 
 if __name__ == '__main__':
